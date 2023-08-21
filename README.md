@@ -24,7 +24,7 @@ spiel提供了Python和C++的api。使用python3构建项目的流程:
 - 到open_spiel/python/games/__init__.py中添加刚才的脚本
 - open_spiel/python/tests/pyspiel_test.py中添加游戏短名
 - open_spiel/python/CMakeLists.txt中添加junqi_test.py
-- 在项目根目录中运行install.sh,会自动安装一些包
+- 在项目根目录中运行install.sh,会自动安装一些包(需要[配置代理](#环境搭建))
 - `python setup.py build`
 - `python setup.py install`过程中可能失败，需要更换国内源
 - 还没学
