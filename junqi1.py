@@ -15,9 +15,11 @@
 # Lint as python3
 import copy
 import enum
+from typing import List, Any
 
 import numpy as np
 import pyspiel
+from numpy import ndarray
 
 _NUM_PLAYERS = 2
 _NUM_ROWS = 6
@@ -50,7 +52,7 @@ _GAME_INFO = pyspiel.GameInfo(
     min_utility=-1.0,
     max_utility=1.0,
     utility_sum=0.0,
-    max_game_length=100  # _NUM_CELLS * _NUM_CELLS
+    max_game_length=200  # _NUM_CELLS * _NUM_CELLS
 )
 
 
@@ -92,8 +94,6 @@ class JunQiGame(pyspiel.Game):
 class JunQiState(pyspiel.State):
     """A python version of the JunQi state."""
 
-    # TODO: Add methods to define and change current game length
-
     def __init__(self, game):
         """Constructor; should only be called by Game.new_initial_state."""
         super().__init__(game)
@@ -103,16 +103,18 @@ class JunQiState(pyspiel.State):
         self._is_terminal: bool = False
 
         self.game_phase: GamePhase = GamePhase.DEPLOYING
+        self.game_real_length: int = 0
+        self.game_length: int = 0
 
         self.selected_pos: list[[int, int], [int, int]] = [[0, 0], [_NUM_ROWS - 1, _NUM_COLS - 1]]
         self.decode_action: list[[int, int]] = [0, 0] * (_NUM_COLS * _NUM_ROWS)
-        self.board: list[list[Chess]] = [[Chess(0, -1)] * _NUM_COLS] * _NUM_ROWS
+        self.board: list[list[Chess]] = [[Chess(0, -1)] * _NUM_COLS for _ in range(_NUM_ROWS)]
         self.chess_list: list[list[int]] = [[9, 8, 8, 7, 7, 6, 6, 2, 1], [9, 8, 8, 7, 7, 6, 6, 2, 1]]
-        self.obs_mov: list[list[int]] = [[0] * _NUM_COLS] * _NUM_ROWS
+        self.obs_mov: list[list[int]] = [[0] * _NUM_COLS for _ in range(_NUM_ROWS)]
         self.obs_attack: bool = False
 
         for i in range(_NUM_COLS * _NUM_ROWS):
-            self.decode_action[i] = [i // _NUM_COLS, i % _NUM_ROWS]
+            self.decode_action[i] = [i // _NUM_COLS, i % _NUM_COLS]
 
     # OpenSpiel (PySpiel) API functions are below. This is the standard set that
     # should be implemented by every perfect-information sequential-move game.
@@ -121,9 +123,10 @@ class JunQiState(pyspiel.State):
         """Returns id of the next player to move, or TERMINAL if game is over."""
         return pyspiel.PlayerId.TERMINAL if self._is_terminal else self._cur_player
 
-    def _legal_actions(self, player: int) -> list[bool]:
+    def _legal_actions(self, player: int) -> list[Any]:
         """Returns a list of legal actions."""
         actions: list[bool] = [False] * (_NUM_COLS * _NUM_ROWS)
+        actions_idx_list: list[int] = []
         if self.game_phase == GamePhase.DEPLOYING:
             for i in range(_NUM_COLS * _NUM_ROWS // 2):
                 actions[i] = True if self.chess_list[player][i] != 0 else False
@@ -132,7 +135,8 @@ class JunQiState(pyspiel.State):
                 for j in range(_NUM_COLS):
                     if (self.board[i][j].country == player
                             and self.board[i][j].type != ChessType.MINE
-                            and self.board[i][j].type != ChessType.FLAG):
+                            and self.board[i][j].type != ChessType.FLAG
+                            and self._is_legal_start([i, j], player)):
                         actions[i * _NUM_COLS + j] = True
         elif self.game_phase == GamePhase.MOVING:
             from_pos: list[int, int] = self.selected_pos[player]
@@ -140,18 +144,14 @@ class JunQiState(pyspiel.State):
                            [from_pos[0] - 1, from_pos[1]],
                            [from_pos[0], from_pos[1] + 1],
                            [from_pos[0], from_pos[1] - 1]]:
-                actions[to_pos[0] * _NUM_COLS + to_pos[1]] = True \
-                    if self._is_legal_destination(to_pos, player) else False
-        surrender: bool = True
-        for action in actions:
-            if action:
-                surrender = False
-                break
-        if surrender:
-            # End game by no legal move.
-            self._is_terminal = True
-            self._player0_score = -1.0 if player == 0 else 1.0
-        return actions
+                if self._is_legal_destination(to_pos, player):
+                    actions[to_pos[0] * _NUM_COLS + to_pos[1]] = True
+        for i in range(len(actions)):
+            if actions[i]:
+                actions_idx_list.append(i)
+        if len(actions_idx_list) == 0:
+            actions_idx_list.append(_NUM_COLS * _NUM_ROWS)
+        return actions_idx_list
 
     def _is_legal_destination(self, to_pos: list[int, int], player: int) -> bool:
         """Check whether the destination of a move is legal."""
@@ -159,11 +159,29 @@ class JunQiState(pyspiel.State):
         return True if (0 <= r < _NUM_ROWS and 0 <= c < _NUM_COLS
                         and self.board[r][c].country != player) else False
 
+    def _is_legal_start(self, from_pos: list[int, int], player: int) -> bool:
+        """Check whether the start point of a move is legal."""
+        for to_pos in [[from_pos[0] + 1, from_pos[1]],
+                       [from_pos[0] - 1, from_pos[1]],
+                       [from_pos[0], from_pos[1] + 1],
+                       [from_pos[0], from_pos[1] - 1]]:
+            if self._is_legal_destination(to_pos, player):
+                return True
+        return False
+
     def _apply_action(self, action: int) -> None:
         """Applies the specified action to the state."""
         # TODO: Remove copy module if we can, and refactor the code to easier ones.
         # TODO: Add method to change self.obs_mov and self.obs_attack
+        print(self.serialize(), end="\n\n") if self.game_phase != GamePhase.SELECTING else print("", end="")
         player = self._cur_player
+
+        if action == _NUM_COLS * _NUM_ROWS:
+            # End game by no legal move.
+            self._is_terminal = True
+            self._player0_score = -1.0 if player == 0 else 1.0
+            return
+
         if self.game_phase == GamePhase.DEPLOYING:
             r, c = self.selected_pos[player][0], self.selected_pos[player][1]
             self.board[r][c] = Chess(self.chess_list[player][action], player)
@@ -174,20 +192,24 @@ class JunQiState(pyspiel.State):
             else:
                 r += (c - 1) // _NUM_COLS
                 c = (c - 1) % _NUM_COLS
-                if r == (_NUM_ROWS // 2) and c == _NUM_COLS - 1:
+                if r == (_NUM_ROWS // 2) - 1 and c == _NUM_COLS - 1:
                     # Deployment phase ended, start selecting-moving phase
                     self.game_phase = GamePhase.SELECTING
             # TODO: Maybe this line is not necessary.
             self.selected_pos[player][0], self.selected_pos[player][1] = r, c
             self._cur_player = 1 - self._cur_player
+
         elif self.game_phase == GamePhase.SELECTING:
             self.selected_pos[player] = copy.deepcopy(self.decode_action[action])
+            self.game_phase = GamePhase.MOVING
+
         elif self.game_phase == GamePhase.MOVING:
             attacker = copy.deepcopy(self.board[self.selected_pos[player][0]][self.selected_pos[player][1]])
             defender = copy.deepcopy(self.board[self.decode_action[action][0]][self.decode_action[action][1]])
             if defender.type == ChessType.NONE:
                 self.board[self.decode_action[action][0]][self.decode_action[action][1]] = copy.deepcopy(attacker)
             else:
+                self.obs_attack = True
                 if defender.type == ChessType.FLAG:
                     # End game by captured flag.
                     self._is_terminal = True
@@ -200,8 +222,14 @@ class JunQiState(pyspiel.State):
                     self.board[self.decode_action[action][0]][self.decode_action[action][1]] = copy.deepcopy(attacker)
                 elif attacker.type < defender.type:
                     pass
+
             self.board[self.selected_pos[player][0]][self.selected_pos[player][1]] = Chess(0, -1)
+
             self._cur_player = 1 - self._cur_player
+            self.game_real_length += 1
+            self.game_phase = GamePhase.SELECTING
+
+        self.game_length += 1
 
     def _action_to_string(self, player, action):
         """Action -> string."""
@@ -240,20 +268,27 @@ class JunQiObserver:
         # TODO: Add interface for the number of moves of history
 
         self.num_history_move: int = 20
-        scalar_sha: int = 1
-        prev_select_sha: int = 1
+        self.num_steps_to_attack: int = 20
+        scalar_shape: int = 1
+        prev_select_shape: int = 1
+
         # Observation components. See paper page 37.
         # Note that we deleted "lakes on the map".
-        #                                    Private Info.     Public Info. -i    Public Info. i   Move m i
-        self.shape = (
+        #
+        #                          Private Info.      Public Info. -i    Public Info. i     Move m i
+        self.shape = (  # pointers      |                     |                 |               |
             _NUM_ROWS, _NUM_COLS, (_NUM_CHESS_TYPES + _NUM_CHESS_TYPES + _NUM_CHESS_TYPES + self.num_history_move +
-                                   scalar_sha + scalar_sha + scalar_sha + scalar_sha + prev_select_sha))
-        #                                    Remain Len.  Remain Mov.  Game Phase   Pha.Sele.Mov. Prev. Selectoin
+                                   scalar_shape + scalar_shape + scalar_shape + scalar_shape + prev_select_shape))
+        #                          Remain Len.    Remain Mov.    Game Phase     Pha.Sele.Mov.  Prev. Selectoin
 
         self.tensor = np.zeros(np.prod(self.shape), np.float32)
         self.dict = {"observation": np.reshape(self.tensor, self.shape)}
 
         self.mov_idx: int = 0
+        idx = 3 * _NUM_CHESS_TYPES + self.num_history_move + 1
+        for row in range(_NUM_ROWS):
+            for col in range(_NUM_COLS):
+                self.dict["observation"][row][col][idx] = self.num_steps_to_attack
 
     def set_from(self, state, player):
         """Updates `tensor` and `dict` to reflect `state` from PoV of `player`."""
@@ -312,14 +347,14 @@ class JunQiObserver:
                 # before the game is considered a draw.
                 # Shape: Scalar -> _NUM_COLS * _NUM_ROWS * 1 tensor.
                 _idx = 3 * _NUM_CHESS_TYPES + self.num_history_move
-                obs[row][col][_idx] = _GAME_INFO.max_game_length  # TODO: Need changes in state
+                obs[row][col][_idx] = _GAME_INFO.max_game_length - state.game_length
 
                 # The ratio of the number of moves since the last attack
                 # to the maximum number of moves without attack before
                 # the game is considered a draw.
                 # Shape: Scalar -> _NUM_COLS * _NUM_ROWS * 1 tensor.
                 _idx = 3 * _NUM_CHESS_TYPES + self.num_history_move + 1
-                obs[row][col][_idx] = prev_obs[row][col][0] - 1  # TODO: Need changes in state
+                obs[row][col][_idx] = prev_obs[row][col][0] - 1 if not state.obs_attack else self.num_steps_to_attack
 
                 # The phase of the game.
                 # Either deployment (1) or play (0).
@@ -357,6 +392,11 @@ class JunQiObserver:
 # Helper functions for game details.
 
 
+def _board_to_string(board):
+    """Returns a string representation of the board."""
+    return "\n".join("".join([str(chess) for chess in row]) for row in board)
+
+
 class Chess:
     def __init__(self, num=-10, country=-1):
         self.num = num
@@ -366,11 +406,11 @@ class Chess:
 
     def __str__(self):
         if self.type == ChessType.NONE:
-            return f"\033[;;m{self.num}\033[0m"
+            return f"\033[;;m{self.name}\033[0m"
         elif self.country == 0:
-            return f"\033[;30;43m{self.num}\033[0m"
+            return f"\033[;30;43m{self.name}\033[0m"
         elif self.country == 1:
-            return f"\033[;30;42m{self.num}\033[0m"
+            return f"\033[;30;42m{self.name}\033[0m"
 
     def __repr__(self):
         return repr(self.num)
@@ -383,11 +423,6 @@ class Chess:
 
     def __gt__(self, other):
         return self.num > other
-
-
-def _board_to_string(board):
-    """Returns a string representation of the board."""
-    return "\n".join("".join([str(chess) for chess in row]) for row in board)
 
 
 # Register the game with the OpenSpiel library
