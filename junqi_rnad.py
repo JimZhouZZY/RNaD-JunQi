@@ -149,7 +149,7 @@ def main(unused_argv):
         rnad_solver = pickle.load(f)
     '''
     i = 0
-    epoch = 1000
+    epoch = 1e7
     t_list = []
     t_std = time.perf_counter()
     threading.Thread(target=plot).start()

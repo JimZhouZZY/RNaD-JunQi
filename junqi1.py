@@ -109,8 +109,10 @@ class JunQiState(pyspiel.State):
         self.selected_pos: list[[int, int], [int, int]] = [[0, 0], [_NUM_ROWS - 1, _NUM_COLS - 1]]
         self.decode_action: list[[int, int]] = [0, 0] * (_NUM_COLS * _NUM_ROWS)
         self.board: list[list[Chess]] = [[Chess(0, -1)] * _NUM_COLS for _ in range(_NUM_ROWS)]
-        self.chess_list: list[list[int]] = [[9, 8, 8, 7, 7, 6, 6, 2, 1], [9, 8, 8, 7, 7, 6, 6, 2, 1]]
-        self.obs_mov: list[list[int]] = [[0] * _NUM_COLS for _ in range(_NUM_ROWS)]
+        self.chess_list: list[list[int]] = [[9, 8, 8, 7, 7, 6, 6, 2, 1],
+                                            [9, 8, 8, 7, 7, 6, 6, 2, 1]]
+        self.obs_mov: list[list[list[int]]] = [[[0] * _NUM_COLS for _ in range(_NUM_ROWS)],
+                                               [[0] * _NUM_COLS for _ in range(_NUM_ROWS)]]
         self.obs_attack: bool = False
 
         for i in range(_NUM_COLS * _NUM_ROWS):
@@ -172,7 +174,7 @@ class JunQiState(pyspiel.State):
     def _apply_action(self, action: int) -> None:
         """Applies the specified action to the state."""
         # TODO: Remove copy module if we can, and refactor the code to easier ones.
-        # TODO: Add method to change self.obs_mov and self.obs_attack
+        # TODO: Try to make the code easier
         print(self.serialize(), end="\n\n") if self.game_phase != GamePhase.SELECTING else print("", end="")
         player = self._cur_player
 
@@ -204,12 +206,22 @@ class JunQiState(pyspiel.State):
             self.game_phase = GamePhase.MOVING
 
         elif self.game_phase == GamePhase.MOVING:
-            attacker = copy.deepcopy(self.board[self.selected_pos[player][0]][self.selected_pos[player][1]])
-            defender = copy.deepcopy(self.board[self.decode_action[action][0]][self.decode_action[action][1]])
+            self.obs_mov: list[list[list[int]]] = [[[0] * _NUM_COLS for _ in range(_NUM_ROWS)],
+                                                   [[0] * _NUM_COLS for _ in range(_NUM_ROWS)]]
+
+            attacker: Chess = copy.deepcopy(self.board[self.selected_pos[player][0]][self.selected_pos[player][1]])
+            defender: Chess = copy.deepcopy(self.board[self.decode_action[action][0]][self.decode_action[action][1]])
+
             if defender.type == ChessType.NONE:
                 self.board[self.decode_action[action][0]][self.decode_action[action][1]] = copy.deepcopy(attacker)
+
+                self.obs_mov[player][self.selected_pos[player][0]][self.selected_pos[player][1]] = -1
+                self.obs_mov[1 - player][self.selected_pos[player][0]][self.selected_pos[player][1]] = -1
+
             else:
                 self.obs_attack = True
+                self.obs_mov[player][self.selected_pos[player][0]][self.selected_pos[player][1]] = -2
+                self.obs_mov[1 - player][self.selected_pos[player][0]][self.selected_pos[player][1]] = -2
                 if defender.type == ChessType.FLAG:
                     # End game by captured flag.
                     self._is_terminal = True
@@ -222,6 +234,9 @@ class JunQiState(pyspiel.State):
                     self.board[self.decode_action[action][0]][self.decode_action[action][1]] = copy.deepcopy(attacker)
                 elif attacker.type < defender.type:
                     pass
+
+            self.obs_mov[player][self.decode_action[action][0]][self.decode_action[action][1]] = 1
+            self.obs_mov[1 - player][self.decode_action[action][0]][self.decode_action[action][1]] = 1
 
             self.board[self.selected_pos[player][0]][self.selected_pos[player][1]] = Chess(0, -1)
 
@@ -299,7 +314,8 @@ class JunQiObserver:
         obs.fill(0)
 
         _idx = 0
-        self.mov_idx = self.mov_idx + 1 if self.mov_idx < self.num_history_move else 0
+        self.mov_idx = self.mov_idx + (1 if (self.mov_idx < self.num_history_move
+                                             and state.game_phase == GamePhase.SELECTING) else 0)
 
         for row in range(_NUM_ROWS):
             for col in range(_NUM_COLS):
@@ -308,40 +324,57 @@ class JunQiObserver:
                 # The player’s own private information.
                 # Shape: _NUM_ROWS * _NUM_COLS * _NUM_CHESS_TYPES tensor.
                 _idx = 0
-                for t in range(_NUM_CHESS_TYPES):
+                for t in range(1, _NUM_CHESS_TYPES + 1):
                     if _DICT_CHESS_CELL[chess.type] == t:
                         obs[row][col][t] = 1
 
                 # The opponent’s public information.
                 # Contains all 0’s during the deployment phase.
                 # Shape: _NUM_ROWS * _NUM_COLS * _NUM_CHESS_TYPES tensor.
+                # TODO: #unrevealed(t) in paper page 36.
                 _idx = _NUM_CHESS_TYPES
+                for i in range(1, _NUM_CHESS_TYPES + 1):
+                    if chess.country == 1 - player:
+                        obs[row][col][i] = 2
+                for t in range(self.num_history_move):
+                    if prev_obs[row][col][t] == 1 and chess.country == 1 - player:
+                        for i in range(1, _NUM_CHESS_TYPES + 1):
+                            obs[row][col][i] = 3
+                            break
                 # ...
                 # TODO: Add the situation "if the piece at (r, c) is known to have type t".
                 #       For example 40 died and then the position of the flag
                 #       should be a public information.
                 # ...
                 # obs[:][:][_NUM_CHESS_TYPES:2 * _NUM_CHESS_TYPES - 1] = pub_oppo
-                # To be countinued.
+                # To be continued.
 
                 # The player’s own public information.
                 # Contains all 0’s during the deployment phase.
                 # Shape: _NUM_ROWS * _NUM_COLS * _NUM_CHESS_TYPES tensor.
                 _idx = 2 * _NUM_CHESS_TYPES
+                for i in range(1, _NUM_CHESS_TYPES + 1):
+                    if chess.country == player:
+                        obs[row][col][i] = 2
+                for t in range(self.num_history_move):
+                    if prev_obs[row][col][t] == 1 and chess.country == player:
+                        for i in range(1, _NUM_CHESS_TYPES + 1):
+                            obs[row][col][i] = 3
+                            break
                 # ...
                 # TODO: Add the situation "if the piece at (r, c) is known to have type t".
                 #       For example 40 died and then the position of the flag
                 #       should be a public information.
                 # ...
                 # obs[:][:][_NUM_CHESS_TYPES:2 * _NUM_CHESS_TYPES - 1] = pub_oppo
-                # To be countinued.
+                # To be continued.
 
                 # An encoding of the last 40(or other number) moves.
                 # Here we used a scrolling index.
                 # Shape: _NUM_ROWS * _NUM_COLS * self.num_history_move tensor.
                 # TODO: Need changes in state
                 _idx = 3 * _NUM_CHESS_TYPES
-                obs[row][col][self.mov_idx + _idx] = state.obs_mov[row][col]
+                obs[row][col][self.mov_idx + _idx] = copy.deepcopy(state.obs_mov[player][row][col])
 
                 # The ratio of the game length to the maximum length
                 # before the game is considered a draw.
