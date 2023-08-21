@@ -18,7 +18,7 @@ __注：游戏部分的api没有doc，只能在open_spiel/spiel.h中找到说明
 ## 流程  
 Spiel对windows的系统支持有限，我们在Ubuntu20.04上进行开发调试，分别用wsl和linux主机进行前期部分流程，训练阶段需配置远程服务器环境
 
-spiel提供了Python和C++的api。使用python3构建项目的流程:  
+spiel提供了Python和C++的api。使用**python>=3.9**构建项目的流程:  
 - 克隆仓库(需要[配置代理](#环境搭建))
 - openspiel/python/game下完成junqi.py(游戏类型的配置，棋盘状态和规则的定义，AI所获得的信息等内容)和junqi_test.py
 - 到open_spiel/python/games/__init__.py中添加刚才的脚本
