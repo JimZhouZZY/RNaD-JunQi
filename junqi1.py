@@ -15,19 +15,19 @@
 # Lint as python3
 import copy
 import enum
-from typing import List, Any
+from typing import Any
 
 import numpy as np
 import pyspiel
-from numpy import ndarray
 
 _NUM_PLAYERS = 2
+_NUM_MAX_PEACE_STEP = 10
 _NUM_ROWS = 6
 _NUM_COLS = 3
 _NUM_CELLS = _NUM_ROWS * _NUM_COLS
 _NUM_CHESS_TYPES = 6
 _DICT_CHESS_CELL = {9: 6, 8: 5, 7: 4, 6: 3, 2: 2, 1: 1, 0: 0}
-_DICT_CHESS_NAME = {6: "雷", 5: "师", 4: "旅", 3: "团", 2: "炸", 1: "旗", 0: "空"}
+_DICT_CHESS_NAME = {6: "雷", 5: "师", 4: "旅", 3: "团", 2: "炸", 1: "旗", 0: "空", -10:"口"}
 
 _GAME_TYPE = pyspiel.GameType(
     short_name="junqi1",
@@ -72,6 +72,7 @@ class ChessType(enum.IntEnum):
     BOMB: int = 2
     FLAG: int = 1
     NONE: int = 0
+    UNKOWN: int = -10
 
 
 class JunQiGame(pyspiel.Game):
@@ -103,7 +104,8 @@ class JunQiState(pyspiel.State):
         self._is_terminal: bool = False
 
         self.game_phase: GamePhase = GamePhase.DEPLOYING
-        self.game_real_length: int = 0
+        self.game_length_real: int = 0
+        self.game_length_peace: int = 0
         self.game_length: int = 0
 
         self.selected_pos: list[[int, int], [int, int]] = [[0, 0], [_NUM_ROWS - 1, _NUM_COLS - 1]]
@@ -176,7 +178,7 @@ class JunQiState(pyspiel.State):
         """Applies the specified action to the state."""
         # TODO: Remove copy module if we can, and refactor the code to easier ones.
         # TODO: Try to make the code easier
-        print(self.serialize(), end="\n\n") if self.game_phase != GamePhase.SELECTING else print("", end="")
+        # print(self.serialize(), end="\n\n") if self.game_phase != GamePhase.SELECTING else print("", end="")
         player = self._cur_player
 
         if action == _NUM_COLS * _NUM_ROWS:
@@ -207,6 +209,7 @@ class JunQiState(pyspiel.State):
             self.game_phase = GamePhase.MOVING
 
         elif self.game_phase == GamePhase.MOVING:
+            self.obs_attack = False
             self.obs_mov: list[list[list[int]]] = [[[0] * _NUM_COLS for _ in range(_NUM_ROWS)],
                                                    [[0] * _NUM_COLS for _ in range(_NUM_ROWS)]]
 
@@ -236,13 +239,17 @@ class JunQiState(pyspiel.State):
                 elif attacker.type < defender.type:
                     pass
 
+            self.game_length_peace += 1
+            if self.obs_attack:
+                self.game_length_peace = 0
+
             self.obs_mov[player][self.decode_action[action][0]][self.decode_action[action][1]] = 1
             self.obs_mov[1 - player][self.decode_action[action][0]][self.decode_action[action][1]] = 1
 
             self.board[self.selected_pos[player][0]][self.selected_pos[player][1]] = Chess(0, -1)
 
             self._cur_player = 1 - self._cur_player
-            self.game_real_length += 1
+            self.game_length_real += 1
             self.game_phase = GamePhase.SELECTING
 
         self.game_length += 1
@@ -262,6 +269,16 @@ class JunQiState(pyspiel.State):
 
     def serialize(self):
         return _board_to_string(self.board)
+
+    def serialize_pov(self, player) -> str:
+        pov_board: list[list[Chess]] = [[Chess(0, -1)] * _NUM_COLS for _ in range(_NUM_ROWS)]
+        for row in range(_NUM_ROWS):
+            for col in range(_NUM_COLS):
+                if self.board[row][col].country == player:
+                    pov_board[row][col] = self.board[row][col]
+                elif self.board[row][col].country == 1 - player:
+                    pov_board[row][col] = Chess(-10, 1 - player)
+        return _board_to_string_pov(pov_board, self.board)
 
     def serialize_action(self, action):
         return f"Action:{self.decode_action[action]} AKA {action}"
@@ -284,7 +301,6 @@ class JunQiObserver:
         # TODO: Add interface for the number of moves of history
 
         self.num_history_move: int = 20
-        self.num_steps_to_attack: int = 20
         scalar_shape: int = 1
         prev_select_shape: int = 1
 
@@ -304,7 +320,7 @@ class JunQiObserver:
         idx = 3 * _NUM_CHESS_TYPES + self.num_history_move + 1
         for row in range(_NUM_ROWS):
             for col in range(_NUM_COLS):
-                self.dict["observation"][row][col][idx] = self.num_steps_to_attack
+                self.dict["observation"][row][col][idx] = _NUM_MAX_PEACE_STEP
 
     def set_from(self, state, player):
         """Updates `tensor` and `dict` to reflect `state` from PoV of `player`."""
@@ -316,7 +332,7 @@ class JunQiObserver:
 
         _idx = 0
         self.mov_idx = (self.mov_idx + 1) if (self.mov_idx <= self.num_history_move
-                                             and state.game_phase == GamePhase.SELECTING) else 0
+                                              and state.game_phase == GamePhase.SELECTING) else 0
 
         for row in range(_NUM_ROWS):
             for col in range(_NUM_COLS):
@@ -388,7 +404,7 @@ class JunQiObserver:
                 # the game is considered a draw.
                 # Shape: Scalar -> _NUM_COLS * _NUM_ROWS * 1 tensor.
                 _idx = 3 * _NUM_CHESS_TYPES + self.num_history_move + 1
-                obs[row][col][_idx] = (prev_obs[row][col][0] - 1) if not state.obs_attack else self.num_steps_to_attack
+                obs[row][col][_idx] = _NUM_MAX_PEACE_STEP - state.game_length_peace
 
                 # The phase of the game.
                 # Either deployment (1) or play (0).
@@ -442,9 +458,7 @@ class JunQiObserver:
                 str_obs[i] += "\n"
 
         print("Current Player: " + str(player), str(state.current_player()))
-        if str_obs[3] == str_obs[5] and obs[0][0][3 * _NUM_CHESS_TYPES + self.num_history_move] == 20:
-            pass
-        [print(obs_title[i]+ "\n" + str_obs[i]) for i in range(len(obs_title))]
+        [print(obs_title[i] + "\n" + str_obs[i]) for i in range(len(obs_title))]
 
 
 # Helper functions for game details.
@@ -453,6 +467,18 @@ class JunQiObserver:
 def _board_to_string(board):
     """Returns a string representation of the board."""
     return "\n".join("".join([str(chess) for chess in row]) for row in board)
+
+def _board_to_string_pov(pov_board, board):
+    """Returns a string representation of the board."""
+    str_board: str = ""
+    for row in range(_NUM_ROWS):
+        for col in range(_NUM_COLS):
+            str_board += str(pov_board[row][col])
+        str_board += "      |      "
+        for col in range(_NUM_COLS):
+            str_board += str(board[row][col])
+        str_board += "\n"
+    return str_board
 
 
 class Chess:

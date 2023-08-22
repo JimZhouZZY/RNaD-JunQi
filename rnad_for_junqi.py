@@ -1023,24 +1023,22 @@ class RNaDSolver(policy_lib.Policy):
         return action, actor_step
 
     def pit(self):
-        states = [
-            self._play_chance(self._game.new_initial_state())
-            for _ in range(1)
-        ]
-        env_step = self._batch_of_states_as_env_step(states)
-
+        human_player = 0
         while True:
-            human_player = 0
+            states = [
+                self._play_chance(self._game.new_initial_state())
+                for _ in range(1)
+            ]
+            env_step = self._batch_of_states_as_env_step(states)
             state = states[0]
             while not state.is_terminal():
                 print("=========================")
-                print(self.get_stringed_board(state))
+                print(self.get_stringed_board(state, human_player))
                 print("=========================")
+                a, actor_step = self.actor_step(env_step)
                 if human_player == state.current_player():
-                    a = [command_line_action(state) for _ in range(1)]
-                else:
-                    # prev_env_step = env_step
-                    a, actor_step = self.actor_step(env_step)
+                    print(f"Result from RNaD: {a}")
+                    a = [command_line_action(state, a) for _ in range(1)]
                 states = self._batch_of_states_apply_action(states, a)
                 env_step = self._batch_of_states_as_env_step(states)
             human_player = 1 - human_player
@@ -1104,15 +1102,15 @@ class RNaDSolver(policy_lib.Policy):
         return state
 
     @staticmethod
-    def get_stringed_board(state):
-        return state.serialize()
+    def get_stringed_board(state, human_player = 0):
+        return state.serialize_pov(human_player)
 
     def get_stringed_action(self):
         actions = self._ex_state.legal_actions()
         return "\n".join(self._ex_state.serialize_action(action) for action in actions)
 
 
-def command_line_action(state):
+def command_line_action(state, rnad_action):
     """Gets a valid action from the user on the command line."""
     current_player = state.current_player()
     legal_actions = state.legal_actions()
@@ -1123,6 +1121,8 @@ def command_line_action(state):
         print("Choose an action from {}:".format(legal_actions))
         sys.stdout.flush()
         action_str = input()
+        if action_str == "":
+            action_str = str(rnad_action[0])
         try:
             action = int(action_str)
         except ValueError:

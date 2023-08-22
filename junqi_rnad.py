@@ -104,7 +104,7 @@ def plot():
             ax.clear()
             ax.plot(epochs, loss_values)  # , marker='o', linestyle='-')
             ax.set_title('Training Loss Curve')
-            ax.set_xlabel('Epoch')
+            ax.set_xlabel('Iteration')
             ax.set_ylabel('Loss')
             plt.pause(0.01)
             plt.draw()
@@ -125,7 +125,7 @@ config = rnad.RNaDConfig(
     trajectory_max=200,
     state_representation=rnad.StateRepresentation.OBSERVATION,
     policy_network_layers=(256, 256),
-    batch_size=1,
+    batch_size=512,
     learning_rate=0.00005,
     adam=rnad.AdamConfig(),
     clip_gradient=10_000,
@@ -149,19 +149,19 @@ def main(unused_argv):
         rnad_solver = pickle.load(f)
     '''
     i = 0
-    epoch = 1e7
+    iterations = 1e1
     t_list = []
     t_std = time.perf_counter()
     threading.Thread(target=plot).start()
-    while (i <= epoch):
+    while (i <= iterations):
         t_start = time.perf_counter()
         print_loss(rnad_solver.step(), i)
         t_end = time.perf_counter()
         t_list.append(t_end - t_start)
         print(
-            f"[INFO] Training in progress: {100 * i / epoch}% [{i} of {epoch} epoches] " + "Time used: " + time.strftime(
+            f"[INFO] Training in progress: {100 * i / iterations}% [{i} of {iterations} epoches] " + "Time used: " + time.strftime(
                 "%H:%M:%S", time.gmtime(t_end - t_std)) + " ETA: " + time.strftime(
-                "%H:%M:%S", time.gmtime(numpy.average(t_list) * (epoch - i))))
+                "%H:%M:%S", time.gmtime(numpy.average(t_list) * (iterations - i))))
         i += 1
     with open('model.pkl', 'wb') as f:
         pickle.dump(rnad_solver, f)
