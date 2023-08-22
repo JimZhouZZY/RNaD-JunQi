@@ -123,7 +123,7 @@ def print_loss(any, i):
 config = rnad.RNaDConfig(
     game_name='junqi1',
     trajectory_max=200,
-    state_representation=rnad.StateRepresentation.INFO_SET,
+    state_representation=rnad.StateRepresentation.OBSERVATION,
     policy_network_layers=(256, 256),
     batch_size=1,
     learning_rate=0.00005,
