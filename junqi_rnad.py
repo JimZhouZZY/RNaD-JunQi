@@ -115,9 +115,11 @@ def print_loss(any, i):
     loss_values.append(any['loss'].tolist())
     epochs.append(any['learner_steps'])
     if i % 1 == 0:
-        print(f"[DATA] Loss: {round(any['loss'].tolist(), 4)}, "
+        print(
+            f"[DATA] Loss: {round(any['loss'].tolist(), 4)}, "
               f"Actor Steps: {any['actor_steps']}, "
-              f"Learner Steps: {any['learner_steps']}")
+              f"Learner Steps: {any['learner_steps']}"
+        )
 
 
 config = rnad.RNaDConfig(
@@ -136,33 +138,40 @@ config = rnad.RNaDConfig(
     nerd=rnad.NerdConfig(),
     c_vtrace=1.0,
     finetune=rnad.FineTuning(),
-    seed=42, )
+    seed=42,
+)
 
 
 def main(unused_argv):
     # logging.info("Loading %s", FLAGS.game_name)
     # game = pyspiel.load_game(FLAGS.game_name)
-    rnad_solver = JunQiSolver(config)
-
-    '''
+    with open('model.pkl', 'wb') as f:
+        pass
     with open('model.pkl', 'rb') as f:
-        rnad_solver = pickle.load(f)
-    '''
+        if f.readline() != b'':
+            print("[INFO] Model data found, continuing training...")
+            rnad_solver = pickle.load(f)
+        else:
+            rnad_solver = JunQiSolver(config)
     i = 0
-    iterations = 1e1
+    iterations = 1e2
     t_list = []
     t_std = time.perf_counter()
     threading.Thread(target=plot).start()
-    while (i <= iterations):
-        t_start = time.perf_counter()
-        print_loss(rnad_solver.step(), i)
-        t_end = time.perf_counter()
-        t_list.append(t_end - t_start)
-        print(
-            f"[INFO] Training in progress: {100 * i / iterations}% [{i} of {iterations} epoches] " + "Time used: " + time.strftime(
-                "%H:%M:%S", time.gmtime(t_end - t_std)) + " ETA: " + time.strftime(
-                "%H:%M:%S", time.gmtime(numpy.average(t_list) * (iterations - i))))
-        i += 1
+    try:
+        while (i <= iterations):
+            t_start = time.perf_counter()
+            print_loss(rnad_solver.step(), i)
+            t_end = time.perf_counter()
+            t_list.append(t_end - t_start)
+            print(
+                f"[INFO] Training in progress: {100 * i / iterations}% [{i} of {iterations} iterations] " + "Time used: " + time.strftime(
+                    "%H:%M:%S", time.gmtime(t_end - t_std)) + " ETA: " + time.strftime(
+                    "%H:%M:%S", time.gmtime(numpy.average(t_list) * (iterations - i))))
+            i += 1
+    except KeyboardInterrupt:
+        with open('model.pkl', 'wb') as f:
+            pickle.dump(rnad_solver, f)
     with open('model.pkl', 'wb') as f:
         pickle.dump(rnad_solver, f)
 
