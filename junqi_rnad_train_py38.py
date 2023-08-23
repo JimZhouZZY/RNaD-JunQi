@@ -29,7 +29,7 @@ import warnings
 from open_spiel.python.algorithms.rnad import rnad_for_junqi as rnad
 
 _exit = 0
-_TIME_GAP = 60
+_TIME_GAP = 300
 
 FLAGS = flags.FLAGS
 
@@ -107,7 +107,8 @@ def plot():
             ax.set_xlabel('Iteration')
             ax.set_ylabel('Loss')
             plt.pause(0.01)
-            plt.draw()
+            #plt.draw()
+            plt.savefig(len(iterations_list))
             plt.savefig(str(len(iterations_list)))
             plt.pause(0.01)
 
@@ -124,11 +125,11 @@ def print_loss(any, i):
 
 
 config = rnad.RNaDConfig(
-    game_name='junqi1',
+    game_name='junqi1_py38',
     trajectory_max=200,
     state_representation=rnad.StateRepresentation.OBSERVATION,
     policy_network_layers=(256, 256),
-    batch_size=1,
+    batch_size=512,
     learning_rate=0.00005,
     adam=rnad.AdamConfig(),
     clip_gradient=10_000,
