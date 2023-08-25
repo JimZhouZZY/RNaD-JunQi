@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Python RNAD example."""
+import jax
 import numpy
 from absl import app
 from absl import flags
@@ -25,6 +26,9 @@ import pickle
 import time
 import threading
 import warnings
+
+jax.config.update("jax_enable_x64", True)
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".99"
 
 from open_spiel.python.algorithms.rnad import rnad_for_junqi as rnad
 
@@ -127,7 +131,7 @@ config = rnad.RNaDConfig(
     game_name='junqi1',
     trajectory_max=200,
     state_representation=rnad.StateRepresentation.OBSERVATION,
-    policy_network_layers=(256, 256),
+    policy_network_layers=(256, 256, 256, 256),
     batch_size=1,
     learning_rate=0.00005,
     adam=rnad.AdamConfig(),
@@ -146,22 +150,21 @@ config = rnad.RNaDConfig(
 def main(unused_argv):
     # logging.info("Loading %s", FLAGS.game_name)
     # game = pyspiel.load_game(FLAGS.game_name)
-    with open('model.pkl', 'wb') as f:
-        pass
-    with open('model.pkl', 'rb') as f:
-        if f.readline() != b'':
+    if os.path.exists("model.pkl"):
+        with open('model.pkl', 'rb') as f:
             print("[INFO] Model data found, continuing training...")
             rnad_solver = pickle.load(f)
-        else:
-            rnad_solver = JunQiSolver(config)
+    else:
+        rnad_solver = JunQiSolver(config)
     i = 0
-    iterations = 1e2
+    iterations = 1e4
     t_list = []
     t_std = time.perf_counter()
     threading.Thread(target=plot).start()
     try:
         while (i <= iterations):
             t_start = time.perf_counter()
+            #rnad_solver.step()
             print_loss(rnad_solver.step(), i)
             t_end = time.perf_counter()
             t_list.append(t_end - t_start)

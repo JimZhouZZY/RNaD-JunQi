@@ -19,6 +19,8 @@ from typing import Any
 
 import numpy as np
 import pyspiel
+import jax
+from jax import numpy as jnp
 
 _NUM_PLAYERS = 2
 _NUM_MAX_PEACE_STEP = 10
@@ -108,12 +110,12 @@ class JunQiState(pyspiel.State):
         self.game_length_peace: int = 0
         self.game_length: int = 0
 
-        self.selected_pos: list[[int, int], [int, int]] = [[0, 0], [_NUM_ROWS - 1, _NUM_COLS - 1]]
-        self.decode_action: list[[int, int]] = [0, 0] * (_NUM_COLS * _NUM_ROWS)
-        self.board: list[list[Chess]] = [[Chess(0, -1)] * _NUM_COLS for _ in range(_NUM_ROWS)]
-        self.chess_list: list[list[int]] = [[6, 5, 5, 4, 4, 3, 3, 2, 1],
+        self.selected_pos = [[0, 0], [_NUM_ROWS - 1, _NUM_COLS - 1]]
+        self.decode_action = [0, 0] * (_NUM_COLS * _NUM_ROWS)
+        self.board = [[Chess(0, -1)] * _NUM_COLS for _ in range(_NUM_ROWS)]
+        self.chess_list = [[6, 5, 5, 4, 4, 3, 3, 2, 1],
                                             [6, 5, 5, 4, 4, 3, 3, 2, 1]]
-        self.obs_mov: list[list[list[int]]] = [[[0] * _NUM_COLS for _ in range(_NUM_ROWS)],
+        self.obs_mov = [[[0] * _NUM_COLS for _ in range(_NUM_ROWS)],
                                                [[0] * _NUM_COLS for _ in range(_NUM_ROWS)]]
         self.obs_attack: bool = False
 
@@ -128,7 +130,7 @@ class JunQiState(pyspiel.State):
         """Returns id of the next player to move, or TERMINAL if game is over."""
         return pyspiel.PlayerId.TERMINAL if self._is_terminal else self._cur_player
 
-    def _legal_actions(self, player: int) -> list[Any]:
+    def _legal_actions(self, player: int):
         """Returns a list of legal actions."""
         actions: list[bool] = [False] * (_NUM_COLS * _NUM_ROWS)
         actions_idx_list: list[int] = []
@@ -144,7 +146,7 @@ class JunQiState(pyspiel.State):
                             and self._is_legal_start([i, j], player)):
                         actions[i * _NUM_COLS + j] = True
         elif self.game_phase == GamePhase.MOVING:
-            from_pos: list[int, int] = self.selected_pos[player]
+            from_pos = self.selected_pos[player]
             for to_pos in [[from_pos[0] + 1, from_pos[1]],
                            [from_pos[0] - 1, from_pos[1]],
                            [from_pos[0], from_pos[1] + 1],
@@ -158,13 +160,13 @@ class JunQiState(pyspiel.State):
             actions_idx_list.append(_NUM_COLS * _NUM_ROWS)
         return actions_idx_list
 
-    def _is_legal_destination(self, to_pos: list[int, int], player: int) -> bool:
+    def _is_legal_destination(self, to_pos, player: int) -> bool:
         """Check whether the destination of a move is legal."""
         r, c = to_pos[0], to_pos[1]
         return True if (0 <= r < _NUM_ROWS and 0 <= c < _NUM_COLS
                         and self.board[r][c].country != player) else False
 
-    def _is_legal_start(self, from_pos: list[int, int], player: int) -> bool:
+    def _is_legal_start(self, from_pos, player: int) -> bool:
         """Check whether the start point of a move is legal."""
         for to_pos in [[from_pos[0] + 1, from_pos[1]],
                        [from_pos[0] - 1, from_pos[1]],
@@ -433,9 +435,9 @@ class JunQiObserver:
         """Observation of `state` from the PoV of `player`, as a string."""
         # TODO: Add string formed observation for debugging and logging.
         obs = self.dict["observation"]
-        obs_title: list[str] = ["Prv.", "Pub. -i", "Pub. i", "History", "len1",
+        obs_title = ["Prv.", "Pub. -i", "Pub. i", "History", "len1",
                                 "len2", "Game phase", "Select", "Prev.Selection"]
-        str_obs: list[str] = [""] * 9
+        str_obs = [""] * 9
 
         for row in range(_NUM_ROWS):
             for col in range(_NUM_COLS):

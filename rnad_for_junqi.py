@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Python implementation of R-NaD (https://arxiv.org/pdf/2206.15378.pdf)."""
-
+import random
 import sys
 import enum
 import functools
@@ -24,6 +24,9 @@ import jax
 from jax import lax
 from jax import numpy as jnp
 from jax import tree_util as tree
+
+import tensorflow as tf
+
 import numpy as np
 import optax
 
@@ -618,7 +621,7 @@ class RNaDConfig:
     policy_network_layers: Sequence[int] = (256, 256)
 
     # The batch size to use when learning/improving parameters.
-    batch_size: int = 1  # 256
+    batch_size: int = 256  # 256
     # The learning rate for `params`.
     learning_rate: float = 0.00005
     # The config related to the ADAM optimizer used for updating `params`.
@@ -940,6 +943,7 @@ class RNaDSolver(policy_lib.Policy):
             "actor_steps": self.actor_steps,
             "learner_steps": self.learner_steps,
         })
+        # print(logs)
         return logs
 
     def _next_rng_key(self) -> chex.PRNGKey:
@@ -1004,12 +1008,17 @@ class RNaDSolver(policy_lib.Policy):
         pi = self.config.finetune.post_process_policy(pi, env_step.legal)
         return pi
 
+    @functools.partial(jax.jit, static_argnums=(0,))
+    def _network_jit_apply(
+            self, params: Params, env_step: EnvStep) -> chex.Array:
+        pi, _, _, _ = self.network.apply(params, env_step)
+        pi = jnp.asarray(pi).astype("float64")
+        pi = pi / jnp.sum(pi, axis=-1, keepdims=True)
+        return pi
+
     # TODO(author16): jit actor_step.
     def actor_step(self, env_step: EnvStep):
-        pi, _, _, _ = self.network.apply(self.params, env_step)
-        pi = np.asarray(pi).astype("float64")
-        # TODO(author18): is this policy normalization really needed?
-        pi = pi / np.sum(pi, axis=-1, keepdims=True)
+        pi = self._network_jit_apply(self.params, env_step)
 
         action = np.apply_along_axis(
             lambda x: self._np_rng.choice(range(pi.shape[1]), p=x), axis=-1, arr=pi)
@@ -1043,6 +1052,37 @@ class RNaDSolver(policy_lib.Policy):
                 env_step = self._batch_of_states_as_env_step(states)
             human_player = 1 - human_player
 
+    def pit_random(self):
+        random_player = 0
+        reward = [0, 0]
+        num = 0
+        wins = 0
+        loses = 0
+        while True:
+            states = [
+                self._play_chance(self._game.new_initial_state())
+                for _ in range(1)
+            ]
+            env_step = self._batch_of_states_as_env_step(states)
+            state = states[0]
+            while not state.is_terminal():
+                if state.current_player() == random_player:
+                    actions = state.legal_actions()
+                    idx = random.randint(0, len(actions) - 1)
+                    a = [actions[idx]]
+                else:
+                    a, actor_step = self.actor_step(env_step)
+                states = self._batch_of_states_apply_action(states, a)
+                env_step = self._batch_of_states_as_env_step(states)
+            reward[0] += state.returns()[1-random_player]
+            reward[1] += state.returns()[random_player]
+            if state.returns()[1-random_player] == 1:
+                wins += 1
+            if state.returns()[random_player] == 1:
+                loses += 1
+            random_player = 1 - random_player
+            num += 1
+            print(f"Score: {reward}, WinRate: {wins/num}, LoseRate: {loses/num}")
 
 
     def collect_batch_trajectory(self) -> TimeStep:
@@ -1059,12 +1099,14 @@ class RNaDSolver(policy_lib.Policy):
 
             states = self._batch_of_states_apply_action(states, a)
             env_step = self._batch_of_states_as_env_step(states)
+            print(prev_env_step)
             timesteps.append(
                 TimeStep(
                     env=prev_env_step,
                     actor=ActorStep(
                         action_oh=actor_step.action_oh,
                         policy=actor_step.policy,
+
                         rewards=env_step.rewards),
                 ))
         # Concatenate all the timesteps together to form a single rollout [T, B, ..]

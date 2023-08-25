@@ -108,9 +108,9 @@ class JunQiState(pyspiel.State):
         self.game_length_peace: int = 0
         self.game_length: int = 0
 
-        self.selected_pos = [[0, 0], [_NUM_ROWS - 1, _NUM_COLS - 1]]
-        self.decode_action = [0, 0] * (_NUM_COLS * _NUM_ROWS)
-        self.board = [[Chess(0, -1)] * _NUM_COLS for _ in range(_NUM_ROWS)]
+        self.selected_pos = np.array([[0, 0], [_NUM_ROWS - 1, _NUM_COLS - 1]])
+        self.decode_action = np.array([0, 0] * (_NUM_COLS * _NUM_ROWS))
+        self.board = np.array([[Chess(0, -1)] * _NUM_COLS for _ in range(_NUM_ROWS)])
         self.chess_list = [[6, 5, 5, 4, 4, 3, 3, 2, 1],
                                             [6, 5, 5, 4, 4, 3, 3, 2, 1]]
         self.obs_mov = [[[0] * _NUM_COLS for _ in range(_NUM_ROWS)],
@@ -128,7 +128,7 @@ class JunQiState(pyspiel.State):
         """Returns id of the next player to move, or TERMINAL if game is over."""
         return pyspiel.PlayerId.TERMINAL if self._is_terminal else self._cur_player
 
-    def _legal_actions(self, player: int) -> list[Any]:
+    def _legal_actions(self, player: int):
         """Returns a list of legal actions."""
         actions: list[bool] = [False] * (_NUM_COLS * _NUM_ROWS)
         actions_idx_list: list[int] = []

@@ -148,8 +148,8 @@ def main(unused_argv):
     with open('model.pkl', 'rb') as f:
         rnad_solver = pickle.load(f)
 
-
-    rnad_solver.pit()
+    rnad_solver.pit_random()
+    #rnad_solver.pit()
 
 
 if __name__ == "__main__":
