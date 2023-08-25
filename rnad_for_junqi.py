@@ -16,7 +16,7 @@ import random
 import sys
 import enum
 import functools
-from typing import Any, Callable, Sequence, Tuple
+from typing import Any, Callable, Sequence, Tuple, Union, Mapping, Optional
 
 import chex
 import haiku as hk
@@ -636,7 +636,7 @@ class RNaDConfig:
     entropy_schedule_repeats: Sequence[int] = (1,)
     entropy_schedule_size: Sequence[int] = (20_000,)
     # The weight of the reward regularisation term in RNaD.
-    eta_reward_transform: float = 0.8 # 0.2
+    eta_reward_transform: float = 0.8  # 0.2
     nerd: NerdConfig = NerdConfig()
     c_vtrace: float = 1.0
 
@@ -748,13 +748,13 @@ class RNaDSolver(policy_lib.Policy):
             mlp_torso = hk.nets.MLP(
                 self.config.policy_network_layers, activate_final=True
             )
-            torso = mlp_torso(env_step.obs)
+            torso = PyramidModule(N=2, M=2)  # env_step.obs
+            pm_value_head = ValueHeadModule()
+            pm_policy_head = PolicyHeadModule()
 
-            mlp_policy_head = hk.nets.MLP([self._game.num_distinct_actions()])
-            logit = mlp_policy_head(torso)
-
-            mlp_policy_value = hk.nets.MLP([1])
-            v = mlp_policy_value(torso)
+            temp_obs = torso(jnp.reshape(env_step.obs, (12, 5, 61)))
+            logit = pm_policy_head(temp_obs)
+            v = pm_value_head(temp_obs)
 
             pi = _legal_policy(logit, env_step.legal)
             log_pi = legal_log_policy(logit, env_step.legal)
@@ -1041,11 +1041,11 @@ class RNaDSolver(policy_lib.Policy):
             env_step = self._batch_of_states_as_env_step(states)
             state = states[0]
             while not state.is_terminal():
-                print("=========================")
-                print(self.get_stringed_board(state, human_player))
-                print("=========================")
                 a, actor_step = self.actor_step(env_step)
                 if human_player == state.current_player():
+                    print("=========================")
+                    print(self.get_stringed_board(state, human_player))
+                    print("=========================")
                     print(f"Result from RNaD: {a}")
                     a = [command_line_action(state, a) for _ in range(1)]
                 states = self._batch_of_states_apply_action(states, a)
@@ -1074,16 +1074,15 @@ class RNaDSolver(policy_lib.Policy):
                     a, actor_step = self.actor_step(env_step)
                 states = self._batch_of_states_apply_action(states, a)
                 env_step = self._batch_of_states_as_env_step(states)
-            reward[0] += state.returns()[1-random_player]
+            reward[0] += state.returns()[1 - random_player]
             reward[1] += state.returns()[random_player]
-            if state.returns()[1-random_player] == 1:
+            if state.returns()[1 - random_player] == 1:
                 wins += 1
             if state.returns()[random_player] == 1:
                 loses += 1
             random_player = 1 - random_player
             num += 1
-            print(f"Score: {reward}, WinRate: {wins/num}, LoseRate: {loses/num}")
-
+            print(f"Score: {reward}, WinRate: {wins / num}, LoseRate: {loses / num}")
 
     def collect_batch_trajectory(self) -> TimeStep:
         states = [
@@ -1099,7 +1098,6 @@ class RNaDSolver(policy_lib.Policy):
 
             states = self._batch_of_states_apply_action(states, a)
             env_step = self._batch_of_states_as_env_step(states)
-            print(prev_env_step)
             timesteps.append(
                 TimeStep(
                     env=prev_env_step,
@@ -1144,7 +1142,7 @@ class RNaDSolver(policy_lib.Policy):
         return state
 
     @staticmethod
-    def get_stringed_board(state, human_player = 0):
+    def get_stringed_board(state, human_player=0):
         return state.serialize_pov(human_player)
 
     def get_stringed_action(self):
@@ -1170,3 +1168,225 @@ def command_line_action(state, rnad_action):
         except ValueError:
             continue
     return action
+
+
+class ConvResBlock(hk.Module):
+
+    def __init__(
+            self,
+            channels: int,
+            stride: Union[int, Sequence[int]],
+            name: Optional[str] = None,
+    ):
+        super().__init__(name=name)
+
+        self.conv_0 = hk.Conv2D(
+            output_channels=channels // 2,
+            kernel_shape=3,
+            stride=stride,
+            with_bias=False,
+            padding="SAME",
+            name="conv_0")
+
+        self.conv_1 = hk.Conv2D(
+            output_channels=channels,
+            kernel_shape=3,
+            stride=1,
+            with_bias=False,
+            padding="SAME",
+            name="conv_1")
+
+        self.proj_conv = hk.Conv2D(
+            output_channels=channels,
+            kernel_shape=1,
+            stride=stride,
+            with_bias=False,
+            padding="SAME",
+            name="shortcut_conv")
+
+    def __call__(self, inputs):
+        out = shortcut = inputs
+
+        shortcut = self.proj_conv(shortcut)
+
+        out = self.conv_0(out)
+        out = jax.nn.relu(out)
+        out = self.conv_1(out)
+        out = jax.nn.relu(out)
+
+        return out + shortcut
+
+
+class DeconvResBlock(hk.Module):
+
+    def __init__(
+            self,
+            channels: int,
+            stride: Union[int, Sequence[int]],
+            name: Optional[str] = None,
+    ):
+        super().__init__(name=name)
+
+        self.conv_0 = hk.Conv2DTranspose(
+            output_channels=channels // 2,
+            kernel_shape=3,
+            stride=stride,
+            with_bias=False,
+            padding="SAME",
+            name="conv_0")
+
+        self.conv_1 = hk.Conv2DTranspose(
+            output_channels=channels,
+            kernel_shape=3,
+            stride=1,
+            with_bias=False,
+            padding="SAME",
+            name="conv_1")
+
+    def __call__(self, inputs, is_training, test_local_stats):
+        out = shortcut = inputs
+
+        out = self.conv_0(out)
+        out = jax.nn.relu(out)
+        out = self.conv_1(out)
+        out = jax.nn.relu(out)
+
+        return out + shortcut
+
+
+class ConvReluBlock(hk.Module):
+
+    def __init__(
+            self,
+            channels: int,
+            kernel_shape: Union[int, Sequence[int]],
+            stride: Union[int, Sequence[int]],
+            name: Optional[str] = None,
+    ):
+        super().__init__(name=name)
+
+        self.conv = hk.Conv2D(
+            output_channels=channels,
+            kernel_shape=kernel_shape,
+            stride=stride,
+            with_bias=False,
+            padding="SAME",
+            name="conv")
+
+    def __call__(self, inputs):
+        out = self.conv(inputs)
+        out = jax.nn.relu(out)
+
+        return out
+
+
+class PyramidModule(hk.Module):
+
+    def __init__(self, M, N):
+        super().__init__()
+
+        self.N = N
+        self.M = M
+
+        self.block_0 = ConvReluBlock(
+            channels=256,
+            kernel_shape=3,
+            stride=1,
+        )
+
+        self.block_1 = ConvResBlock(
+            channels=256,
+            stride=1,
+        )
+
+        self.block_2 = ConvResBlock(
+            channels=256,
+            stride=2,
+        )
+
+        self.block_3 = ConvResBlock(
+            channels=320,
+            stride=1,
+        )
+
+        self.block_4 = DeconvResBlock(
+            channels=320,
+            stride=1,
+        )
+
+        self.block_5 = DeconvResBlock(
+            channels=256,
+            stride=2,
+        )
+
+        self.block_6 = DeconvResBlock(
+            channels=256,
+            stride=1,
+        )
+
+    def __call__(self, input):
+        out = self.block_0(input)
+
+        for i in range(self.N):
+            out = self.block_1(out)
+
+        out = self.block_2(out)
+
+        for i in range(self.M):
+            out = self.block_3(out)
+
+        for i in range(self.M):
+            out = self.block_4(out)
+
+        out = self.block_5(out)
+
+        for i in range(self.N):
+            out = self.block_6(out)
+
+        return out
+
+
+class ValueHeadModule(hk.Module):
+
+    def __init__(self):
+        super().__init__()
+
+        self.pm_value_head = PyramidModule(N=0, M=0)
+
+        self.conv_relu_block = ConvReluBlock(
+            channels=1,
+            kernel_shape=3,
+            stride=1
+        )
+
+        self.linear = hk.Linear(output_size=1)
+
+    def __call__(self, input):
+        out = self.pm_value_head(input)
+        out = self.conv_relu_block(out)
+        out = self.linear(out)
+
+        return out
+
+
+class PolicyHeadModule(hk.Module):
+
+    def __init__(self):
+        super().__init__()
+
+        self.pm_policy_head = PyramidModule(N=1, M=0)
+
+        self.conv = hk.Conv2D(
+            output_channels=1,
+            kernel_shape=3,
+            stride=1,
+            with_bias=False,
+            padding="SAME",
+            name="conv")
+
+    def __call__(self, input):
+        out = self.pm_policy_head(input)
+        out = self.conv(out)
+        out = jax.nn.softmax(out)
+
+        return out

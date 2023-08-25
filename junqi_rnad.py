@@ -157,7 +157,7 @@ def main(unused_argv):
     else:
         rnad_solver = JunQiSolver(config)
     i = 0
-    iterations = 1e4
+    iterations = 1e0
     t_list = []
     t_std = time.perf_counter()
     threading.Thread(target=plot).start()
@@ -165,7 +165,7 @@ def main(unused_argv):
         while (i <= iterations):
             t_start = time.perf_counter()
             #rnad_solver.step()
-            print_loss(rnad_solver.step(), i)
+            #print_loss(rnad_solver.step(), i)
             t_end = time.perf_counter()
             t_list.append(t_end - t_start)
             print(
