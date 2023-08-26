@@ -72,13 +72,13 @@ _GAME_TYPE = pyspiel.GameType(
 )
 
 _GAME_INFO = pyspiel.GameInfo(
-    num_distinct_actions=_NUM_CELLS * _NUM_CELLS + 1,
+    num_distinct_actions=_NUM_CELLS + 1,
     max_chance_outcomes=0,
     num_players=2,
     min_utility=-1.0,
     max_utility=1.0,
     utility_sum=0.0,
-    max_game_length=200  # _NUM_CELLS * _NUM_CELLS
+    max_game_length=400  # _NUM_CELLS * _NUM_CELLS
 )
 
 

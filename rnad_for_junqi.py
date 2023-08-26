@@ -262,7 +262,11 @@ class FineTuning:
 
 def _legal_policy(logits: chex.Array, legal_actions: chex.Array) -> chex.Array:
     """A soft-max policy that respects legal_actions."""
-    chex.assert_equal_shape((logits, legal_actions))
+    try:
+        chex.assert_equal_shape((logits, legal_actions))
+    except AssertionError:
+        logits = jnp.reshape(logits, (61))
+        chex.assert_equal_shape((logits, legal_actions))
     # Fiddle a bit to make sure we don't generate NaNs or Inf in the middle.
     l_min = logits.min(axis=-1, keepdims=True)
     logits = jnp.where(legal_actions, logits, l_min)
@@ -277,7 +281,11 @@ def _legal_policy(logits: chex.Array, legal_actions: chex.Array) -> chex.Array:
 def legal_log_policy(logits: chex.Array,
                      legal_actions: chex.Array) -> chex.Array:
     """Return the log of the policy on legal action, 0 on illegal action."""
-    chex.assert_equal_shape((logits, legal_actions))
+    try:
+        chex.assert_equal_shape((logits, legal_actions))
+    except AssertionError:
+        logits = jnp.reshape(logits, (61))
+        chex.assert_equal_shape((logits, legal_actions))
     # logits_masked has illegal actions set to -inf.
     logits_masked = logits + jnp.log(legal_actions)
     max_legal_logit = logits_masked.max(axis=-1, keepdims=True)
@@ -752,10 +760,26 @@ class RNaDSolver(policy_lib.Policy):
             pm_value_head = ValueHeadModule()
             pm_policy_head = PolicyHeadModule()
 
-            temp_obs = torso(jnp.reshape(env_step.obs, (12, 5, 61)))
-            logit = pm_policy_head(temp_obs)
-            v = pm_value_head(temp_obs)
+            # print(env_step.obs.shape)
+            if env_step.obs.shape == (3660,):
+                dm0 = 1
+            else:
+                dm0 = self.config.batch_size
+            shape = (dm0, 12, 5, 61)
+            reshaped_obs = jnp.reshape(env_step.obs, shape)
+            temp_obs = torso(jnp.pad(reshaped_obs, [(0, 0), (0, 0), (0, 1), (0, 0)], mode='constant', constant_values=0))
 
+            logit = pm_policy_head(temp_obs)
+            logit = jnp.reshape(jnp.delete(logit, 5, axis=2), (dm0, 60))
+            v = pm_value_head(temp_obs)
+            v = jnp.reshape(jnp.delete(v, 5, axis=2), (dm0, 60))
+
+            zero_column = jnp.zeros((logit.shape[0], 1))
+            logit = jnp.hstack((logit, zero_column))
+            v = jnp.hstack((v, zero_column))
+
+
+            # print(jnp.shape(logit),jnp.shape(temp_obs),jnp.shape(env_step.legal))
             pi = _legal_policy(logit, env_step.legal)
             log_pi = legal_log_policy(logit, env_step.legal)
             return pi, v, log_pi, logit
@@ -1040,7 +1064,9 @@ class RNaDSolver(policy_lib.Policy):
             ]
             env_step = self._batch_of_states_as_env_step(states)
             state = states[0]
-            while not state.is_terminal():
+            # env_step.legal = np.squeeze(env_step.legal)
+            print(env_step)
+            for _ in range(self.config.trajectory_max):
                 a, actor_step = self.actor_step(env_step)
                 if human_player == state.current_player():
                     print("=========================")
@@ -1208,13 +1234,14 @@ class ConvResBlock(hk.Module):
         out = shortcut = inputs
 
         shortcut = self.proj_conv(shortcut)
+        skipout = shortcut
 
         out = self.conv_0(out)
         out = jax.nn.relu(out)
         out = self.conv_1(out)
         out = jax.nn.relu(out)
 
-        return out + shortcut
+        return out + shortcut, skipout
 
 
 class DeconvResBlock(hk.Module):
@@ -1243,11 +1270,34 @@ class DeconvResBlock(hk.Module):
             padding="SAME",
             name="conv_1")
 
-    def __call__(self, inputs, is_training, test_local_stats):
+        self.proj_deconv = hk.Conv2DTranspose(
+            output_channels=channels,
+            kernel_shape=1,
+            stride=stride,
+            with_bias=False,
+            padding="SAME",
+            name="shortcut_deconv")
+
+        self.skipin_deconv = hk.Conv2DTranspose(
+            output_channels=channels // 2 if stride != 2 else 128,
+            kernel_shape=1,
+            stride=stride,
+            with_bias=False,
+            padding="SAME",
+            name="skipin_deconv")
+
+    def __call__(self, inputs, skipin):
         out = shortcut = inputs
+
+        shortcut = self.proj_deconv(shortcut)
 
         out = self.conv_0(out)
         out = jax.nn.relu(out)
+
+        skipin = self.skipin_deconv(skipin)
+
+        out = out + skipin
+
         out = self.conv_1(out)
         out = jax.nn.relu(out)
 
@@ -1300,7 +1350,7 @@ class PyramidModule(hk.Module):
         )
 
         self.block_2 = ConvResBlock(
-            channels=256,
+            channels=320,
             stride=2,
         )
 
@@ -1325,23 +1375,30 @@ class PyramidModule(hk.Module):
         )
 
     def __call__(self, input):
+        skipouts = []
         out = self.block_0(input)
 
         for i in range(self.N):
-            out = self.block_1(out)
+            out, skipout = self.block_1(out)
+            skipouts.append(skipout)
 
-        out = self.block_2(out)
+        out, skipout = self.block_2(out)
+        skipouts.append(skipout)
 
         for i in range(self.M):
-            out = self.block_3(out)
+            out, skipout = self.block_3(out)
+            skipouts.append(skipout)
 
         for i in range(self.M):
-            out = self.block_4(out)
+            out = self.block_4(out, skipouts[-1])
+            del skipouts[-1]
 
-        out = self.block_5(out)
+        out = self.block_5(out, skipouts[-1])
+        del skipouts[-1]
 
         for i in range(self.N):
-            out = self.block_6(out)
+            out = self.block_6(out, skipouts[-1])
+            del skipouts[-1]
 
         return out
 
@@ -1364,7 +1421,13 @@ class ValueHeadModule(hk.Module):
     def __call__(self, input):
         out = self.pm_value_head(input)
         out = self.conv_relu_block(out)
-        out = self.linear(out)
+        #out = jnp.reshape(jnp.append(jnp.reshape(jnp.delete(out, 5, axis=1), (1,60)), 0), (1, 61))
+
+
+        #print(jnp.shape(out))
+        # out = self.linear(out)
+
+        #print(jnp.shape(out), 1111111)
 
         return out
 
@@ -1387,6 +1450,7 @@ class PolicyHeadModule(hk.Module):
     def __call__(self, input):
         out = self.pm_policy_head(input)
         out = self.conv(out)
-        out = jax.nn.softmax(out)
+        # out = jax.nn.softmax(out)
+        #out = jnp.reshape(jnp.append(jnp.reshape(jnp.delete(out, 5, axis=1), (1,60)), 0), (1, 61))
 
         return out

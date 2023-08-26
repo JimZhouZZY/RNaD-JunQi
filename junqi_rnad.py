@@ -132,7 +132,7 @@ config = rnad.RNaDConfig(
     trajectory_max=200,
     state_representation=rnad.StateRepresentation.OBSERVATION,
     policy_network_layers=(256, 256, 256, 256),
-    batch_size=1,
+    batch_size=2,
     learning_rate=0.00005,
     adam=rnad.AdamConfig(),
     clip_gradient=10_000,
@@ -165,7 +165,7 @@ def main(unused_argv):
         while (i <= iterations):
             t_start = time.perf_counter()
             #rnad_solver.step()
-            #print_loss(rnad_solver.step(), i)
+            print_loss(rnad_solver.step(), i)
             t_end = time.perf_counter()
             t_list.append(t_end - t_start)
             print(
@@ -178,8 +178,9 @@ def main(unused_argv):
             pickle.dump(rnad_solver, f)
     with open('model.pkl', 'wb') as f:
         pickle.dump(rnad_solver, f)
-
     rnad_solver.pit()
+
+
 
 
 if __name__ == "__main__":
