@@ -32,7 +32,7 @@ import optax
 
 from open_spiel.python import policy as policy_lib
 import pyspiel
-from network.cnn_paper_32 import PyramidModule, ValueHeadModule, PolicyHeadModule
+from network.cnn_128 import PyramidModule, ValueHeadModule, PolicyHeadModule
 #from rnad.data_class import *
 #from rnad.entropy_schedule import EntropySchedule
 #from rnad.func import *

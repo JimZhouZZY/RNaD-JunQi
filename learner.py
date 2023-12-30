@@ -32,7 +32,7 @@ import optax
 
 from open_spiel.python import policy as policy_lib
 import pyspiel
-from network.cnn_paper_32 import PyramidModule, ValueHeadModule, PolicyHeadModule
+from network.cnn_128 import PyramidModule, ValueHeadModule, PolicyHeadModule
 
 # Some handy aliases.
 # Since most of these are just aliases for a "bag of tensors", the goal
