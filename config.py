@@ -3,8 +3,8 @@ import actor
 import learner
 import os
 
-_NUM_ACTORS = 10
-_BATCH_SIZE = 500
+_NUM_ACTORS = 1
+_BATCH_SIZE = 1
 _SAVE_GAP = 50
 
 _FILE_PATH = os.getcwd() + '/data/'
