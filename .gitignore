@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+network/cnn_paper_128.py
+network/cnn_paper_32.py

@@ -16,15 +16,15 @@ import random
 import sys
 import enum
 import functools
+import time
 from typing import Any, Callable, Sequence, Tuple, Union, Mapping, Optional
-
 import chex
 import haiku as hk
 import jax
 from jax import lax
 from jax import numpy as jnp
 from jax import tree_util as tree
-
+import ray
 import tensorflow as tf
 
 import numpy as np
@@ -32,13 +32,14 @@ import optax
 
 from open_spiel.python import policy as policy_lib
 import pyspiel
+#from network.cnn_paper_32 import PyramidModule, ValueHeadModule, PolicyHeadModule
+
 
 # Some handy aliases.
 # Since most of these are just aliases for a "bag of tensors", the goal
 # is to improve the documentation, and not to actually enforce correctness
 # through pytype.
 Params = chex.ArrayTree
-
 
 class EntropySchedule:
     """An increasing list of steps where the regularisation network is updated.
@@ -127,7 +128,9 @@ class EntropySchedule:
         iteration_size = (last_size * beyond + size * (1 - beyond))
 
         update_target_net = jnp.logical_and(
-            learner_step > 0, jnp.sum(learner_step == iteration_start))
+            learner_step > 0,
+            jnp.sum(learner_step == iteration_start + iteration_size - 1),
+        )
         alpha = jnp.minimum(
             (2.0 * (learner_step - iteration_start)) / iteration_size, 1.0)
 
@@ -265,7 +268,7 @@ def _legal_policy(logits: chex.Array, legal_actions: chex.Array) -> chex.Array:
     try:
         chex.assert_equal_shape((logits, legal_actions))
     except AssertionError:
-        logits = jnp.reshape(logits, (61))
+        logits = jnp.reshape(logits, (8))
         chex.assert_equal_shape((logits, legal_actions))
     # Fiddle a bit to make sure we don't generate NaNs or Inf in the middle.
     l_min = logits.min(axis=-1, keepdims=True)
@@ -284,7 +287,7 @@ def legal_log_policy(logits: chex.Array,
     try:
         chex.assert_equal_shape((logits, legal_actions))
     except AssertionError:
-        logits = jnp.reshape(logits, (61))
+        logits = jnp.reshape(logits, (8))
         chex.assert_equal_shape((logits, legal_actions))
     # logits_masked has illegal actions set to -inf.
     logits_masked = logits + jnp.log(legal_actions)
@@ -620,7 +623,7 @@ class RNaDConfig:
     # The game parameter string including its name and parameters.
     game_name: str
     # The games longer than this value are truncated. Must be strictly positive.
-    trajectory_max: int = 100
+    trajectory_max: int = 500
 
     # The content of the EnvStep.obs tensor.
     state_representation: StateRepresentation = StateRepresentation.INFO_SET
@@ -719,6 +722,26 @@ def optax_optimizer(
     return OptaxOptimizer(state=init_fn(params))
 
 
+def command_line_action(state, rnad_action):
+    """Gets a valid action from the user on the command line."""
+    current_player = state.current_player()
+    legal_actions = state.legal_actions()
+    action = -1
+    for act in legal_actions:
+        print(state.serialize_action(act))
+    while action not in legal_actions:
+        print("Choose an action from {}:".format(legal_actions))
+        sys.stdout.flush()
+        action_str = input()
+        if action_str == "":
+            action_str = str(rnad_action[0])
+        try:
+            action = int(action_str)
+        except ValueError:
+            continue
+    return action
+
+#@ray.remote(num_gpus=1, num_cpus=1)
 class RNaDSolver(policy_lib.Policy):
     """Implements a solver for the R-NaD Algorithm.
 
@@ -750,40 +773,27 @@ class RNaDSolver(policy_lib.Policy):
         self._ex_state = self._play_chance(self._game.new_initial_state())
 
         # The network.
-        def network(
-                env_step: EnvStep
-        ) -> Tuple[chex.Array, chex.Array, chex.Array, chex.Array]:
-            mlp_torso = hk.nets.MLP(
-                self.config.policy_network_layers, activate_final=True
-            )
-            torso = PyramidModule(N=2, M=2)  # env_step.obs
+        def network(env_step) -> Tuple[chex.Array, chex.Array, chex.Array, chex.Array]:
+            conv_torso = PyramidModule(N=2, M=2)  # env_step.obs
+
+            dm0 = self.config.batch_size if env_step.obs.shape != (1*20*73,) else 1
+            shape = (dm0, 10, 2, 73)
+            reshaped_obs = jnp.reshape(env_step.obs, shape)
+
+            torso = conv_torso(reshaped_obs)
+
             pm_value_head = ValueHeadModule()
             pm_policy_head = PolicyHeadModule()
 
-            # print(env_step.obs.shape)
-            if env_step.obs.shape == (3660,):
-                dm0 = 1
-            else:
-                dm0 = self.config.batch_size
-            shape = (dm0, 12, 5, 61)
-            reshaped_obs = jnp.reshape(env_step.obs, shape)
-            temp_obs = torso(jnp.pad(reshaped_obs, [(0, 0), (0, 0), (0, 1), (0, 0)], mode='constant', constant_values=0))
+            logit = pm_policy_head(torso)
+            logit = jnp.reshape(logit, (dm0, 8))
+            v = pm_value_head(torso)
+            v = jnp.reshape(v, (dm0, 8))
 
-            logit = pm_policy_head(temp_obs)
-            logit = jnp.reshape(jnp.delete(logit, 5, axis=2), (dm0, 60))
-            v = pm_value_head(temp_obs)
-            v = jnp.reshape(jnp.delete(v, 5, axis=2), (dm0, 60))
-
-            zero_column = jnp.zeros((logit.shape[0], 1))
-            logit = jnp.hstack((logit, zero_column))
-            v = jnp.hstack((v, zero_column))
-
-
-            # print(jnp.shape(logit),jnp.shape(temp_obs),jnp.shape(env_step.legal))
             pi = _legal_policy(logit, env_step.legal)
             log_pi = legal_log_policy(logit, env_step.legal)
             return pi, v, log_pi, logit
-
+        
         self.network = hk.without_apply_rng(hk.transform(network))
 
         # The machinery related to updating parameters/learner.
@@ -867,19 +877,19 @@ class RNaDSolver(policy_lib.Policy):
             threshold=self.config.nerd.beta)
         return loss_v + loss_nerd  # pytype: disable=bad-return-type  # numpy-scalars
 
-    @functools.partial(jax.jit, static_argnums=(0,))
+    #@functools.partial(jax.jit, static_argnums=(0,))
     def update_parameters(
-            self,
-            params: Params,
-            params_target: Params,
-            params_prev: Params,
-            params_prev_: Params,
-            optimizer: Optimizer,
-            optimizer_target: Optimizer,
-            timestep: TimeStep,
-            alpha: float,
-            learner_steps: int,
-            update_target_net: bool):
+          self,
+          params: Params,
+          params_target: Params,
+          params_prev: Params,
+          params_prev_: Params,
+          optimizer: Optimizer,
+          optimizer_target: Optimizer,
+          timestep: TimeStep,
+          alpha: float,
+          learner_steps: int,
+          update_target_net: bool):
         """A jitted pure-functional part of the `step`."""
         loss_val, grad = self._loss_and_grad(params, params_target, params_prev,
                                              params_prev_, timestep, alpha,
@@ -953,31 +963,50 @@ class RNaDSolver(policy_lib.Policy):
         self.optimizer.state = state["optimizer"]
         self.optimizer_target.state = state["optimizer_target"]
 
+    def split(self, arr):
+        """Splits the first axis of `arr` evenly across the number of devices."""
+        return arr.reshape(n_devices, arr.shape[0] // n_devices, *arr.shape[1:])
+
     def step(self):
         """One step of the algorithm, that plays the game and improves params."""
         timestep = self.collect_batch_trajectory()
         alpha, update_target_net = self._entropy_schedule(self.learner_steps)
         (self.params, self.params_target, self.params_prev, self.params_prev_,
          self.optimizer, self.optimizer_target), logs = self.update_parameters(
-            self.params, self.params_target, self.params_prev, self.params_prev_,
-            self.optimizer, self.optimizer_target, timestep, alpha,
-            self.learner_steps, update_target_net)
+             self.params, self.params_target, self.params_prev, self.params_prev_,
+             self.optimizer, self.optimizer_target, timestep, alpha,
+             self.learner_steps, update_target_net)
         self.learner_steps += 1
         logs.update({
             "actor_steps": self.actor_steps,
             "learner_steps": self.learner_steps,
         })
-        # print(logs)
         return logs
+
+    def learn(self, timestep):
+        alpha, update_target_net = self._entropy_schedule(self.learner_steps)
+        (self.params, self.params_target, self.params_prev, self.params_prev_,
+         self.optimizer, self.optimizer_target), logs = self.update_parameters(
+             self.params, self.params_target, self.params_prev, self.params_prev_,
+             self.optimizer, self.optimizer_target, timestep, alpha,
+             self.learner_steps, update_target_net)
+        self.learner_steps += 1
+        logs.update({
+            "actor_steps": self.actor_steps,
+            "learner_steps": self.learner_steps,
+        })
+        #jax.lax.fr
+        return [self.params, self.params_target, self.params_prev, self.params_prev_,
+         self.optimizer, self.optimizer_target], logs
 
     def _next_rng_key(self) -> chex.PRNGKey:
         """Get the next rng subkey from class rngkey.
 
-    Must *not* be called from under a jitted function!
+        Must *not* be called from under a jitted function!
 
-    Returns:
-      A fresh rng_key.
-    """
+        Returns:
+          A fresh rng_key.
+        """
         self._rngkey, subkey = jax.random.split(self._rngkey)
         return subkey
 
@@ -1025,24 +1054,24 @@ class RNaDSolver(policy_lib.Policy):
             if valid
         }
 
-    @functools.partial(jax.jit, static_argnums=(0,))
+    #@functools.partial(jax.jit, static_argnums=(0,))
     def _network_jit_apply_and_post_process(
             self, params: Params, env_step: EnvStep) -> chex.Array:
         pi, _, _, _ = self.network.apply(params, env_step)
         pi = self.config.finetune.post_process_policy(pi, env_step.legal)
         return pi
 
-    @functools.partial(jax.jit, static_argnums=(0,))
+    #@functools.partial(jax.jit, static_argnums=(0,))
     def _network_jit_apply(
             self, params: Params, env_step: EnvStep) -> chex.Array:
         pi, _, _, _ = self.network.apply(params, env_step)
-        pi = jnp.asarray(pi).astype("float64")
-        pi = pi / jnp.sum(pi, axis=-1, keepdims=True)
         return pi
 
-    # TODO(author16): jit actor_step.
     def actor_step(self, env_step: EnvStep):
         pi = self._network_jit_apply(self.params, env_step)
+        pi = np.asarray(pi).astype("float64")
+        # TODO(author18): is this policy normalization really needed?
+        pi = pi / np.sum(pi, axis=-1, keepdims=True)
 
         action = np.apply_along_axis(
             lambda x: self._np_rng.choice(range(pi.shape[1]), p=x), axis=-1, arr=pi)
@@ -1056,6 +1085,10 @@ class RNaDSolver(policy_lib.Policy):
         return action, actor_step
 
     def pit(self):
+        self.config = RNaDConfig(
+            game_name='junqi1',
+            batch_size=1,
+        )
         human_player = 0
         while True:
             states = [
@@ -1076,15 +1109,23 @@ class RNaDSolver(policy_lib.Policy):
                     a = [command_line_action(state, a) for _ in range(1)]
                 states = self._batch_of_states_apply_action(states, a)
                 env_step = self._batch_of_states_as_env_step(states)
+            print(state.game_length)
+            print(state.game_length_real)
             human_player = 1 - human_player
 
     def pit_random(self):
+        self.config = RNaDConfig(
+            game_name='junqi1',
+            batch_size=1,
+        )
         random_player = 0
         reward = [0, 0]
         num = 0
         wins = 0
         loses = 0
+        peaces = 0
         while True:
+            start_time = time.perf_counter()
             states = [
                 self._play_chance(self._game.new_initial_state())
                 for _ in range(1)
@@ -1092,6 +1133,7 @@ class RNaDSolver(policy_lib.Policy):
             env_step = self._batch_of_states_as_env_step(states)
             state = states[0]
             while not state.is_terminal():
+                a = None
                 if state.current_player() == random_player:
                     actions = state.legal_actions()
                     idx = random.randint(0, len(actions) - 1)
@@ -1104,11 +1146,21 @@ class RNaDSolver(policy_lib.Policy):
             reward[1] += state.returns()[random_player]
             if state.returns()[1 - random_player] == 1:
                 wins += 1
-            if state.returns()[random_player] == 1:
+            elif state.returns()[random_player] == 1:
                 loses += 1
-            random_player = 1 - random_player
+            else:
+                peaces += 1
             num += 1
-            print(f"Score: {reward}, WinRate: {wins / num}, LoseRate: {loses / num}")
+            end_time = time.perf_counter()
+            t = end_time - start_time
+            #print(random_player, state.returns())
+            print("=========================")
+            print(f"Number: {num}, Reward: {[state.returns()[1 - random_player], state.returns()[random_player]]}, in {t} seconds.")
+            print(state.game_length, state.game_length_real, random_player)
+            print(str(state) + '\n')
+            print(f"Score: {reward}, WinRate: {wins / num}, LoseRate: {loses / num}, PeaceRate: {peaces / num}")
+            print("=========================")
+            random_player = 1 - random_player
 
     def collect_batch_trajectory(self) -> TimeStep:
         states = [
@@ -1174,283 +1226,3 @@ class RNaDSolver(policy_lib.Policy):
     def get_stringed_action(self):
         actions = self._ex_state.legal_actions()
         return "\n".join(self._ex_state.serialize_action(action) for action in actions)
-
-
-def command_line_action(state, rnad_action):
-    """Gets a valid action from the user on the command line."""
-    current_player = state.current_player()
-    legal_actions = state.legal_actions()
-    action = -1
-    for act in legal_actions:
-        print(state.serialize_action(act))
-    while action not in legal_actions:
-        print("Choose an action from {}:".format(legal_actions))
-        sys.stdout.flush()
-        action_str = input()
-        if action_str == "":
-            action_str = str(rnad_action[0])
-        try:
-            action = int(action_str)
-        except ValueError:
-            continue
-    return action
-
-
-class ConvResBlock(hk.Module):
-
-    def __init__(
-            self,
-            channels: int,
-            stride: Union[int, Sequence[int]],
-            name: Optional[str] = None,
-    ):
-        super().__init__(name=name)
-
-        self.conv_0 = hk.Conv2D(
-            output_channels=channels // 2,
-            kernel_shape=3,
-            stride=stride,
-            with_bias=False,
-            padding="SAME",
-            name="conv_0")
-
-        self.conv_1 = hk.Conv2D(
-            output_channels=channels,
-            kernel_shape=3,
-            stride=1,
-            with_bias=False,
-            padding="SAME",
-            name="conv_1")
-
-        self.proj_conv = hk.Conv2D(
-            output_channels=channels,
-            kernel_shape=1,
-            stride=stride,
-            with_bias=False,
-            padding="SAME",
-            name="shortcut_conv")
-
-    def __call__(self, inputs):
-        out = shortcut = inputs
-
-        shortcut = self.proj_conv(shortcut)
-        skipout = shortcut
-
-        out = self.conv_0(out)
-        out = jax.nn.relu(out)
-        out = self.conv_1(out)
-        out = jax.nn.relu(out)
-
-        return out + shortcut, skipout
-
-
-class DeconvResBlock(hk.Module):
-
-    def __init__(
-            self,
-            channels: int,
-            stride: Union[int, Sequence[int]],
-            name: Optional[str] = None,
-    ):
-        super().__init__(name=name)
-
-        self.conv_0 = hk.Conv2DTranspose(
-            output_channels=channels // 2,
-            kernel_shape=3,
-            stride=stride,
-            with_bias=False,
-            padding="SAME",
-            name="conv_0")
-
-        self.conv_1 = hk.Conv2DTranspose(
-            output_channels=channels,
-            kernel_shape=3,
-            stride=1,
-            with_bias=False,
-            padding="SAME",
-            name="conv_1")
-
-        self.proj_deconv = hk.Conv2DTranspose(
-            output_channels=channels,
-            kernel_shape=1,
-            stride=stride,
-            with_bias=False,
-            padding="SAME",
-            name="shortcut_deconv")
-
-        self.skipin_deconv = hk.Conv2DTranspose(
-            output_channels=channels // 2 if stride != 2 else 128,
-            kernel_shape=1,
-            stride=stride,
-            with_bias=False,
-            padding="SAME",
-            name="skipin_deconv")
-
-    def __call__(self, inputs, skipin):
-        out = shortcut = inputs
-
-        shortcut = self.proj_deconv(shortcut)
-
-        out = self.conv_0(out)
-        out = jax.nn.relu(out)
-
-        skipin = self.skipin_deconv(skipin)
-
-        out = out + skipin
-
-        out = self.conv_1(out)
-        out = jax.nn.relu(out)
-
-        return out + shortcut
-
-
-class ConvReluBlock(hk.Module):
-
-    def __init__(
-            self,
-            channels: int,
-            kernel_shape: Union[int, Sequence[int]],
-            stride: Union[int, Sequence[int]],
-            name: Optional[str] = None,
-    ):
-        super().__init__(name=name)
-
-        self.conv = hk.Conv2D(
-            output_channels=channels,
-            kernel_shape=kernel_shape,
-            stride=stride,
-            with_bias=False,
-            padding="SAME",
-            name="conv")
-
-    def __call__(self, inputs):
-        out = self.conv(inputs)
-        out = jax.nn.relu(out)
-
-        return out
-
-
-class PyramidModule(hk.Module):
-
-    def __init__(self, M, N):
-        super().__init__()
-
-        self.N = N
-        self.M = M
-
-        self.block_0 = ConvReluBlock(
-            channels=256,
-            kernel_shape=3,
-            stride=1,
-        )
-
-        self.block_1 = ConvResBlock(
-            channels=256,
-            stride=1,
-        )
-
-        self.block_2 = ConvResBlock(
-            channels=320,
-            stride=2,
-        )
-
-        self.block_3 = ConvResBlock(
-            channels=320,
-            stride=1,
-        )
-
-        self.block_4 = DeconvResBlock(
-            channels=320,
-            stride=1,
-        )
-
-        self.block_5 = DeconvResBlock(
-            channels=256,
-            stride=2,
-        )
-
-        self.block_6 = DeconvResBlock(
-            channels=256,
-            stride=1,
-        )
-
-    def __call__(self, input):
-        skipouts = []
-        out = self.block_0(input)
-
-        for i in range(self.N):
-            out, skipout = self.block_1(out)
-            skipouts.append(skipout)
-
-        out, skipout = self.block_2(out)
-        skipouts.append(skipout)
-
-        for i in range(self.M):
-            out, skipout = self.block_3(out)
-            skipouts.append(skipout)
-
-        for i in range(self.M):
-            out = self.block_4(out, skipouts[-1])
-            del skipouts[-1]
-
-        out = self.block_5(out, skipouts[-1])
-        del skipouts[-1]
-
-        for i in range(self.N):
-            out = self.block_6(out, skipouts[-1])
-            del skipouts[-1]
-
-        return out
-
-
-class ValueHeadModule(hk.Module):
-
-    def __init__(self):
-        super().__init__()
-
-        self.pm_value_head = PyramidModule(N=0, M=0)
-
-        self.conv_relu_block = ConvReluBlock(
-            channels=1,
-            kernel_shape=3,
-            stride=1
-        )
-
-        self.linear = hk.Linear(output_size=1)
-
-    def __call__(self, input):
-        out = self.pm_value_head(input)
-        out = self.conv_relu_block(out)
-        #out = jnp.reshape(jnp.append(jnp.reshape(jnp.delete(out, 5, axis=1), (1,60)), 0), (1, 61))
-
-
-        #print(jnp.shape(out))
-        # out = self.linear(out)
-
-        #print(jnp.shape(out), 1111111)
-
-        return out
-
-
-class PolicyHeadModule(hk.Module):
-
-    def __init__(self):
-        super().__init__()
-
-        self.pm_policy_head = PyramidModule(N=1, M=0)
-
-        self.conv = hk.Conv2D(
-            output_channels=1,
-            kernel_shape=3,
-            stride=1,
-            with_bias=False,
-            padding="SAME",
-            name="conv")
-
-    def __call__(self, input):
-        out = self.pm_policy_head(input)
-        out = self.conv(out)
-        # out = jax.nn.softmax(out)
-        #out = jnp.reshape(jnp.append(jnp.reshape(jnp.delete(out, 5, axis=1), (1,60)), 0), (1, 61))
-
-        return out

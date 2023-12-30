@@ -19,38 +19,61 @@ import enum
 import numpy as np
 import pyspiel
 
+"""
+0## 01
+1## 23
+2#o 45
+3## 67
+4## 89
+5## 10 11
+6## 12 13
+7#o 14 15
+8## 16 17
+9## 18 19
+"""
+
 _NUM_PLAYERS = 2
-_NUM_MAX_PEACE_STEP = 10
-_NUM_ROWS = 12
-_NUM_COLS = 5
+_NUM_MAX_PEACE_STEP = 50
+_NUM_ROWS = 10
+_NUM_COLS = 2
 _NUM_CELLS = _NUM_ROWS * _NUM_COLS
-_NUM_CHESS_TYPES = 12
-_NUM_CHESS_QUANTITY = 25
+_NUM_CHESS_TYPES = 9
+_NUM_CHESS_QUANTITY = 9
+
+_ALPHA_EAG = 2.0
 
 _NUM_CHESS_QUANTITY_BY_TYPE = {
-    12: 2, 11: 3, 10: 1, 9: 1,
-    8: 2, 7: 2, 6: 2, 5: 2,
-    4: 3, 3: 3, 2: 3, 1: 1,
+    1: 1, 2: 1, 3: 1, 4: 1, 5: 1, 6: 1, 7: 1, 8: 1, 9: 1, # 11 = Mine, 12 = Bomb
 }
+
+_CHESS_WEIGHT_BY_TYPE = {
+    12: 8, 11: 6, 10: 10, 9: 9,
+    8: 8, 7: 7, 6: 6, 5: 5,
+    4: 4, 3: 3, 2: 7, 1: 147,
+    0: 0, -10: 0,
+}
+
+_NUM_ALL_WEIGHT = 294
 
 _MAX_DFS_DEPTH = 100
 
-_RAILWAY_ROW_IDX = [1, 5, 6, 10]
-_RAILWAY_COL_IDX = [0, 4]
-_CAMP_POSITIONS = [[2, 1], [2, 3], [3, 2], [4, 1], [4, 3],
-                   [7, 1], [7, 3], [8, 2], [9, 1], [9, 3]]
+_RAILWAY_ROW_IDX = []
+_RAILWAY_COL_IDX = [0]
+_CAMP_POSITIONS = [[2, 1],[7, 1]]
 
-_BLOCK_DOWN_POSITIONS = [[5, 1], [5, 3]]
-_BLOCK_UP_POSITIONS = [[6, 1], [6, 3]]
+_BLOCK_DOWN_POSITIONS = []
+_BLOCK_UP_POSITIONS = []
 
-_BLOCK_MINE_ACTIONS = range(10, 50)
-_BLOCK_BOMB_ACTIONS = range(25, 35)
-_FLAG_ACTIONS = [1, 3, 56, 58]
+_BLOCK_MINE_ACTIONS = range(4, 16)
+_BLOCK_BOMB_ACTIONS = range(8, 12)
+
+_FLAG_POSITIONS = [[0, 0], [0, 1], [9, 0], [9, 1],]
+_FLAG_ACTIONS = [0, 1, 18, 19]
 
 _DICT_CHESS_NAME = {
-    12: "|炸弹|", 11: "|地雷|", 10: "|司令|", 9: "|军长|",
-    8: "|师长|", 7: "|旅长|", 6: "|团长|", 5: "|营长|",
-    4: "|连长|", 3: "|排长|", 2: "|工兵|", 1: "|军旗|",
+    12: "|炸弹|", 11: "|地雷|", 10: "|司令|", 9: "|炸弹|",
+    8: "|地雷|", 7: "|司令|", 6: "|军长|", 5: "|师长|",
+    4: "|旅长|", 3: "|团长|", 2: "|营长|", 1: "|军旗|",
     0: "|空空|", -10: "|口口|"
 }
 
@@ -72,13 +95,13 @@ _GAME_TYPE = pyspiel.GameType(
 )
 
 _GAME_INFO = pyspiel.GameInfo(
-    num_distinct_actions=_NUM_CELLS + 1,
+    num_distinct_actions=_NUM_CELLS,
     max_chance_outcomes=0,
     num_players=2,
     min_utility=-1.0,
     max_utility=1.0,
     utility_sum=0.0,
-    max_game_length=400  # _NUM_CELLS * _NUM_CELLS
+    max_game_length=200,
 )
 
 
@@ -100,20 +123,18 @@ class MapType(enum.IntEnum):
 
 class ChessType(enum.IntEnum):
     """Enum chess type to make the code easy-reading."""
-    BOMB: int = 12
-    MINE: int = 11
-    GENERAL: int = 10
-    LIEUTENANT_GENERAL: int = 9
-    MAJOR_GENERAL: int = 8
-    BRIGADIER_GENERAL: int = 7
-    COLONEL: int = 6
-    LIEUTENANT_COLONEL: int = 5
-    CAPTAIN: int = 4
-    LIEUTENANT: int = 3
-    ENGINEER: int = 2
+    BOMB: int = 9
+    MINE: int = 8
+    GENERAL: int = 7
+    LIEUTENANT_GENERAL: int = 6
+    MAJOR_GENERAL: int = 5
+    BRIGADIER_GENERAL: int = 4
+    COLONEL: int = 3
+    LIEUTENANT_COLONEL: int = 2
     FLAG: int = 1
     NONE: int = 0
     UNKOWN: int = -10
+    ENGINEER: int = -1000
 
 
 class JunQiGame(pyspiel.Game):
@@ -143,12 +164,15 @@ class JunQiState(pyspiel.State):
         self._cur_player: int = 0
         self._player0_score: float = 0.0
         self._is_terminal: bool = False
+        self._is_fake_terminal: bool = [False, False]
+        self._end_in_peace: bool = False
 
         self.game_phase: GamePhase = GamePhase.DEPLOYING
         self.game_length_real: int = 0
         self.game_length_peace: int = 0
         self.game_length: int = 0
 
+        self.general_dead = [False, False]
         self.selected_pos = [[0, 0], [_NUM_ROWS - 1, _NUM_COLS - 1]]
         self.flags_pos = [[0,0], [0,0]]
         self.chess_deploy_idx = [0, 0]
@@ -156,18 +180,10 @@ class JunQiState(pyspiel.State):
         self.board = [[Chess(0, -1)] * _NUM_COLS for _ in range(_NUM_ROWS)]
         self.chess_list = [
             [
-                1, 11, 11, 11, 12,
-                12, 10, 9, 8, 8,
-                7, 7, 6, 6, 5,
-                5, 4, 4, 4, 3,
-                3, 3, 2, 2, 2, 2,
+                1, 9, 8, 7, 6, 5, 4, 3, 2
             ],
             [
-                1, 11, 11, 11, 12,
-                12, 10, 9, 8, 8,
-                7, 7, 6, 6, 5,
-                5, 4, 4, 4, 3,
-                3, 3, 2, 2, 2, 2
+                1, 9, 8, 7, 6, 5, 4, 3, 2
             ],
         ]
         self.map = [[MapType.NORMAL] * _NUM_COLS for _ in range(_NUM_ROWS)]
@@ -181,6 +197,37 @@ class JunQiState(pyspiel.State):
         self.obs_mov = [[[0] * _NUM_COLS for _ in range(_NUM_ROWS)],
                         [[0] * _NUM_COLS for _ in range(_NUM_ROWS)]]
         self.obs_attack: bool = False
+
+        self.obs_pub = np.ones((2, _NUM_ROWS, _NUM_COLS, _NUM_CHESS_TYPES)) + 0
+        self.obs_oppo_pub = np.ones((2, _NUM_ROWS, _NUM_COLS, _NUM_CHESS_TYPES)) + 0
+        for row in range(_NUM_ROWS):
+            for col in range(_NUM_COLS):
+                if row <= 4:
+                    self.obs_pub[0][row][col] = np.zeros(_NUM_CHESS_TYPES) + 0
+                    self.obs_oppo_pub[1][row][col] = np.zeros(_NUM_CHESS_TYPES) + 0
+                if row >= 5:
+                    self.obs_pub[1][row][col] = np.zeros(_NUM_CHESS_TYPES) + 0
+                    self.obs_oppo_pub[0][row][col] = np.zeros(_NUM_CHESS_TYPES) + 0
+                if 2 <= row <= 7:
+                    self.obs_pub[0][row][col][ChessType.MINE-1] = 0
+                    self.obs_pub[1][row][col][ChessType.MINE-1] = 0
+                    self.obs_oppo_pub[0][row][col][ChessType.MINE-1] = 0
+                    self.obs_oppo_pub[1][row][col][ChessType.MINE-1] = 0
+                if row == 4 or row == 5:
+                    self.obs_pub[0][row][col][ChessType.BOMB-1] = 0
+                    self.obs_pub[1][row][col][ChessType.BOMB-1] = 0
+                    self.obs_oppo_pub[0][row][col][ChessType.BOMB-1] = 0
+                    self.obs_oppo_pub[1][row][col][ChessType.BOMB-1] = 0
+                if [row, col] not in _FLAG_POSITIONS:
+                    self.obs_pub[0][row][col][0] = 0
+                    self.obs_pub[1][row][col][0] = 0
+                    self.obs_oppo_pub[0][row][col][0] = 0
+                    self.obs_oppo_pub[1][row][col][0] = 0
+                if [row, col] in _CAMP_POSITIONS:
+                    self.obs_pub[0][row][col] = np.zeros(_NUM_CHESS_TYPES) + 0
+                    self.obs_pub[1][row][col] = np.zeros(_NUM_CHESS_TYPES) + 0
+                    self.obs_oppo_pub[0][row][col] = np.zeros(_NUM_CHESS_TYPES) + 0
+                    self.obs_oppo_pub[1][row][col] = np.zeros(_NUM_CHESS_TYPES) + 0
 
         for i in range(_NUM_COLS * _NUM_ROWS):
             self.decode_action[i] = [i // _NUM_COLS, i % _NUM_COLS]
@@ -197,8 +244,8 @@ class JunQiState(pyspiel.State):
         """Returns a list of legal actions."""
         actions: list[bool] = [False] * (_NUM_COLS * _NUM_ROWS)
         actions_idx_list: list[int] = []
-        selected_chess = self.chess_list[player][self.chess_deploy_idx[player]]
         if self.game_phase == GamePhase.DEPLOYING:
+            selected_chess = self.chess_list[player][self.chess_deploy_idx[player]]
             stt = 0 if player == 0 else _NUM_ROWS // 2
             end = _NUM_ROWS // 2 if player == 0 else _NUM_ROWS
             for row in range(stt, end):
@@ -217,6 +264,7 @@ class JunQiState(pyspiel.State):
         elif self.game_phase == GamePhase.SELECTING:
             for i in range(_NUM_ROWS):
                 for j in range(_NUM_COLS):
+                    #and [i, j] not in _FLAG_POSITIONS
                     if (self.board[i][j].country == player
                             and self.board[i][j].type != ChessType.MINE
                             and self.board[i][j].type != ChessType.FLAG
@@ -229,9 +277,16 @@ class JunQiState(pyspiel.State):
                 actions[to_pos[0] * _NUM_COLS + to_pos[1]] = True
         for i in range(len(actions)):
             if actions[i]:
-                actions_idx_list.append(i)
+                i_obs = i if player == 0 else (_NUM_CELLS-1-i)
+                if player == 1:
+                    i_obs = (i_obs - 1) if i_obs % 2 == 1 else (i_obs + 1)
+                actions_idx_list.append(i_obs)
         if len(actions_idx_list) == 0:
-            actions_idx_list.append(_NUM_COLS * _NUM_ROWS)
+            actions_idx_list.append(_NUM_CELLS - 1)
+            self._is_fake_terminal[player] = True
+            #self._player0_score = -1.0 if self._cur_player == 0 else 1.0
+            
+        #print(actions_idx_list)
         return actions_idx_list
 
     def _get_legal_destination(self, from_pos, player: int):
@@ -334,8 +389,13 @@ class JunQiState(pyspiel.State):
         def dfs(current_pos):
             visited.add(tuple(current_pos))
             reachable_points.append(list(current_pos))
-
-            directions = [(0, 1), (0, -1), (1, 0), (-1, 0)]
+            
+            if list(current_pos) in _BLOCK_UP_POSITIONS:
+                directions = [(0, 1), (0, -1), (1, 0)]
+            elif list(current_pos) in _BLOCK_DOWN_POSITIONS:
+                directions = [(0, 1), (0, -1), (-1, 0)]
+            else:
+                directions = [(0, 1), (0, -1), (1, 0), (-1, 0), (1, 1), (1, -1), (-1, 1), (-1, -1)]
 
             for dx, dy in directions:
                 new_pos = (current_pos[0] + dx, current_pos[1] + dy)
@@ -350,7 +410,15 @@ class JunQiState(pyspiel.State):
                         reachable_points.append(list(new_pos))
                     elif self.board[new_pos[0]][new_pos[1]].country == self.current_player():
                         continue
+                    elif [new_pos[0], new_pos[1]] in _CAMP_POSITIONS:
+                        visited.add(tuple(new_pos))
+                        reachable_points.append(list(new_pos))
+                    elif ((new_pos[0] not in _RAILWAY_ROW_IDX) or (new_pos[1] not in _RAILWAY_COL_IDX) or new_pos[0] in [0, 11] 
+                        and [dx, dy] not in [[1, 1], [1, -1], [-1, 1], [-1, -1]]):
+                        visited.add(tuple(new_pos))
+                        reachable_points.append(list(new_pos))
                     else:
+                        reachable_points.append(list(new_pos))
                         dfs(new_pos)
 
         dfs(from_pos)
@@ -364,10 +432,20 @@ class JunQiState(pyspiel.State):
         # print(self.serialize(), end="\n\n") if self.game_phase != GamePhase.SELECTING else print("", end="")
         player = self._cur_player
 
-        if action == _NUM_COLS * _NUM_ROWS:
-            # End game by no legal move.
-            self._is_terminal = True
-            self._player0_score = -1.0 if player == 0 else 1.0
+        if player == 1:
+            action = (action - 1) if action % 2 == 1 else (action + 1)
+        
+        action = action if self._cur_player == 0 else (19 - action)
+
+
+        if self._is_terminal:
+            self._cur_player = 1 - self._cur_player
+            return
+        
+        if self._is_fake_terminal[player]:
+            if self._is_fake_terminal[1 - player]:
+                self._is_terminal = True
+            self._cur_player = 1 - self._cur_player
             return
 
         if self.game_phase == GamePhase.DEPLOYING:
@@ -375,7 +453,7 @@ class JunQiState(pyspiel.State):
             # print(self.chess_deploy_idx)
             r, c = self.selected_pos[player][0], self.selected_pos[player][1]
             self.board[r][c] = Chess(self.chess_list[player][self.chess_deploy_idx[player]], player)
-            self.chess_deploy_idx[player] += (1 if self.chess_deploy_idx[player] < 25 else 0)
+            self.chess_deploy_idx[player] += (1 if self.chess_deploy_idx[player] < _NUM_CHESS_QUANTITY else 0)
             if self.chess_deploy_idx[player] == 0:
                 self.flags_pos[player] = [r, c]
             if self.chess_deploy_idx[0] == self.chess_deploy_idx[1] == _NUM_CHESS_QUANTITY:
@@ -393,21 +471,40 @@ class JunQiState(pyspiel.State):
 
             attacker: Chess = copy.deepcopy(self.board[self.selected_pos[player][0]][self.selected_pos[player][1]])
             defender: Chess = copy.deepcopy(self.board[self.decode_action[action][0]][self.decode_action[action][1]])
+            
+            obs_defender = self.obs_pub[player][self.decode_action[action][0]][self.decode_action[action][1]]
+            defender_min = 0
+            for i in range(1, _NUM_CHESS_TYPES):
+                obs_defender[i] == 1
+                defender_min = i
 
             if defender.type == ChessType.NONE:
                 self.board[self.decode_action[action][0]][self.decode_action[action][1]] = copy.deepcopy(attacker)
+                
+                self.obs_pub[player][self.decode_action[action][0]][self.decode_action[action][1]] = copy.deepcopy(self.obs_pub[player][self.selected_pos[player][0]][self.selected_pos[player][1]]) # May be useless.
+                self.obs_pub[1 - player][self.decode_action[action][0]][self.decode_action[action][1]] = copy.deepcopy(self.obs_pub[1-player][self.selected_pos[player][0]][self.selected_pos[player][1]])
+                self.obs_oppo_pub[player][self.decode_action[action][0]][self.decode_action[action][1]] = copy.deepcopy(self.obs_oppo_pub[player][self.selected_pos[player][0]][self.selected_pos[player][1]])
+                self.obs_oppo_pub[1 - player][self.decode_action[action][0]][self.decode_action[action][1]] = copy.deepcopy(self.obs_oppo_pub[1-player][self.selected_pos[player][0]][self.selected_pos[player][1]]) # May be useless.
+
+                self.obs_pub[player][self.decode_action[action][0]][self.decode_action[action][1]][ChessType.MINE-1] = 0 # May be useless.
+                self.obs_pub[1 - player][self.decode_action[action][0]][self.decode_action[action][1]][ChessType.MINE-1] = 0
+                self.obs_oppo_pub[player][self.decode_action[action][0]][self.decode_action[action][1]][ChessType.MINE-1] = 0
+                self.obs_oppo_pub[1 - player][self.decode_action[action][0]][self.decode_action[action][1]][ChessType.MINE-1] = 0 # May be useless.
 
                 self.obs_mov[player][self.selected_pos[player][0]][self.selected_pos[player][1]] = -1
                 self.obs_mov[1 - player][self.selected_pos[player][0]][self.selected_pos[player][1]] = -1
 
             else:
                 self.obs_attack = True
-                self.obs_mov[player][self.selected_pos[player][0]][self.selected_pos[player][1]] = -2
-                self.obs_mov[1 - player][self.selected_pos[player][0]][self.selected_pos[player][1]] = -2
+                
+                self.obs_mov[player][self.selected_pos[player][0]][self.selected_pos[player][1]] = -0.5
+                self.obs_mov[1 - player][self.selected_pos[player][0]][self.selected_pos[player][1]] = -0.5
+                
                 if defender.type == ChessType.FLAG:
                     # End game by captured flag.
                     self._is_terminal = True
                     self._player0_score = 1.0 if self._cur_player == 0 else -1.0
+                    self.board[self.decode_action[action][0]][self.decode_action[action][1]] = copy.deepcopy(attacker)
                 elif (attacker.type == ChessType.BOMB
                       or defender.type == ChessType.BOMB
                       or attacker.type == defender.type):
@@ -416,16 +513,47 @@ class JunQiState(pyspiel.State):
                     if defender.type == ChessType.GENERAL:
                         self.board[self.flags_pos[1 - player][0]][self.flags_pos[1 - player][1]].revealed = True
                     self.board[self.decode_action[action][0]][self.decode_action[action][1]] = Chess(0, -1)
+                    self.obs_pub[player][self.decode_action[action][0]][self.decode_action[action][1]] = np.zeros(_NUM_CHESS_TYPES) + 0
                 elif ((attacker.type > defender.type)
                       or
                       (
-                              attacker.type == ChessType.ENGINEER
-                              and defender.type == ChessType.MINE
+                        attacker.type == ChessType.ENGINEER
+                        and defender.type == ChessType.MINE
                       )):
                     self.board[self.decode_action[action][0]][self.decode_action[action][1]] = copy.deepcopy(attacker)
+                    self.obs_pub[1 - player][self.decode_action[action][0]][self.decode_action[action][1]] = copy.deepcopy(self.obs_pub[1-player][self.selected_pos[player][0]][self.selected_pos[player][1]])
+                    self.obs_oppo_pub[player][self.decode_action[action][0]][self.decode_action[action][1]] = copy.deepcopy(self.obs_oppo_pub[player][self.selected_pos[player][0]][self.selected_pos[player][1]])
+
+                    if attacker.type == ChessType.ENGINEER and defender.type == ChessType.MINE:
+                        self.obs_pub[1 - player][self.decode_action[action][0]][self.decode_action[action][1]] = np.zeros(_NUM_CHESS_TYPES) + 0
+                        self.obs_pub[1 - player][self.decode_action[action][0]][self.decode_action[action][1]][2-1] = 1
+                        self.obs_oppo_pub[player][self.decode_action[action][0]][self.decode_action[action][1]] = np.zeros(_NUM_CHESS_TYPES) + 0
+                        self.obs_oppo_pub[player][self.decode_action[action][0]][self.decode_action[action][1]][2-1] = 1
+                    else:
+                        for i in range(1, _NUM_CHESS_TYPES + 1, 1):
+                            if i <= defender.type:
+                                self.obs_pub[1 - player][self.decode_action[action][0]][self.decode_action[action][1]][i-1] = 0
+                        self.obs_pub[1 - player][self.decode_action[action][0]][self.decode_action[action][1]][ChessType.MINE-1] = 0
+                        self.obs_pub[1 - player][self.decode_action[action][0]][self.decode_action[action][1]][ChessType.BOMB-1] = 0
+                        
+                        self.obs_oppo_pub[player][self.decode_action[action][0]][self.decode_action[action][1]] =  np.zeros(_NUM_CHESS_TYPES) + 0
+                        for i in range(defender_min+1, 10, 1):
+                            if i >= _NUM_CHESS_TYPES:
+                                continue
+                            self.obs_oppo_pub[player][self.decode_action[action][0]][self.decode_action[action][1]][i] = 1
                 elif attacker.type < defender.type:
                     if attacker.type == ChessType.GENERAL:
                         self.board[self.flags_pos[player][0]][self.flags_pos[player][1]].revealed = True
+                        self.obs_pub[player][self.decode_action[action][0]][self.decode_action[action][1]] = np.zeros(_NUM_CHESS_TYPES) + 0
+                        self.obs_pub[player][self.decode_action[action][0]][self.decode_action[action][1]][ChessType.MINE-1] = 1
+                    if attacker.type == ChessType.ENGINEER:
+                        self.obs_pub[player][self.decode_action[action][0]][self.decode_action[action][1]][ChessType.MINE-1] = 0
+                    else:
+                        for i in range(1, _NUM_CHESS_TYPES + 1, 1):
+                            if i <= attacker.type:
+                                self.obs_pub[player][self.decode_action[action][0]][self.decode_action[action][1]][i-1] = 0
+                        self.obs_pub[player][self.decode_action[action][0]][self.decode_action[action][1]][ChessType.BOMB-1] = 0
+                        
 
             self.game_length_peace += 1
             if self.obs_attack:
@@ -436,11 +564,27 @@ class JunQiState(pyspiel.State):
 
             self.board[self.selected_pos[player][0]][self.selected_pos[player][1]] = Chess(0, -1)
 
+            self.obs_pub[player][self.selected_pos[player][0]][self.selected_pos[player][1]] = np.zeros(_NUM_CHESS_TYPES)
+            self.obs_pub[1 - player][self.selected_pos[player][0]][self.selected_pos[player][1]] = np.zeros(_NUM_CHESS_TYPES)
+            self.obs_oppo_pub[player][self.selected_pos[player][0]][self.selected_pos[player][1]] = np.zeros(_NUM_CHESS_TYPES)
+            self.obs_oppo_pub[1 - player][self.selected_pos[player][0]][self.selected_pos[player][1]] = np.zeros(_NUM_CHESS_TYPES)
+
             self._cur_player = 1 - self._cur_player
             self.game_length_real += 1
             self.game_phase = GamePhase.SELECTING
 
         self.game_length += 1
+        if self.game_length >= _GAME_INFO.max_game_length:
+            self._is_terminal = True
+            self._end_in_peace = True
+            return
+
+        if self.game_length_peace > _NUM_MAX_PEACE_STEP:
+            # End game by maximum game lenth.
+            self._is_terminal = True
+            self._end_in_peace = True
+            return
+            
 
     def _action_to_string(self, player, action):
         """Action -> string."""
@@ -453,6 +597,9 @@ class JunQiState(pyspiel.State):
 
     def returns(self):
         """Total reward for each player over the course of the game so far."""
+        if self._end_in_peace:
+            self._player0_score = 0
+            
         return [self._player0_score, -self._player0_score]
 
     def serialize(self):
@@ -488,16 +635,16 @@ class JunQiObserver:
         # Here the observation is indexed `(cell state, row, column)`.
         # TODO: Add interface for the number of moves of history
 
-        self.num_history_move: int = 20
+        self.num_history_move: int = 40
         scalar_shape: int = 1
         prev_select_shape: int = 1
 
         # Observation components. See paper page 37.
         # Note that we deleted "lakes on the map".
         #
-        #                          Private Info.      Public Info. -i    Public Info. i     Move m i
-        self.shape = (  # pointers      |                     |                 |               |
-            _NUM_ROWS, _NUM_COLS, (_NUM_CHESS_TYPES + _NUM_CHESS_TYPES + _NUM_CHESS_TYPES + self.num_history_move +
+        #                         Map    Private Info.      Public Info. -i    Public Info. i     Move m i
+        self.shape = (  # pointers |          |                     |                 |               |
+            _NUM_ROWS, _NUM_COLS, (1   + _NUM_CHESS_TYPES + _NUM_CHESS_TYPES + _NUM_CHESS_TYPES + self.num_history_move +
                                    scalar_shape + scalar_shape + scalar_shape + scalar_shape + prev_select_shape))
         #                          Remain Len.    Remain Mov.    Game Phase     Pha.Sele.Mov.  Prev. Selectoin
 
@@ -505,10 +652,6 @@ class JunQiObserver:
         self.dict = {"observation": np.reshape(self.tensor, self.shape)}
 
         self.mov_idx: int = 0
-        idx = 3 * _NUM_CHESS_TYPES + self.num_history_move + 1
-        for row in range(_NUM_ROWS):
-            for col in range(_NUM_COLS):
-                self.dict["observation"][row][col][idx] = _NUM_MAX_PEACE_STEP
 
     def set_from(self, state, player):
         """Updates `tensor` and `dict` to reflect `state` from PoV of `player`."""
@@ -516,57 +659,73 @@ class JunQiObserver:
         # convenient than with the 1-D tensor. Both are views onto the same memory.
         obs = self.dict["observation"]
         prev_obs = copy.deepcopy(obs)
-        obs.fill(0)
+        for row in range(_NUM_ROWS):
+            for col in range(_NUM_COLS):
+                for i in range(self.shape[2]):
+                    if not 3 * _NUM_CHESS_TYPES + 1 <= i < 3 * _NUM_CHESS_TYPES + self.num_history_move + 1:
+                        obs[row][col][i] = 0
 
         _idx = 0
+        obs_row = 0
+        obs_col = 0
         self.mov_idx = (self.mov_idx + 1) if (self.mov_idx <= self.num_history_move
                                               and state.game_phase == GamePhase.SELECTING) else 0
 
         for row in range(_NUM_ROWS):
+            if player == 1:
+                obs_row = _NUM_ROWS - 1 - row
+            else:
+                obs_row = row
             for col in range(_NUM_COLS):
+                if player == 1:
+                    #obs_col = _NUM_COLS - 1 - col
+                    obs_col = col
+                else:
+                    obs_col = col
+
                 chess = state.board[row][col]
+
+                # Map information.
+                _idx = 0
+                obs[obs_row][obs_col][_idx] = -0.5
+                if (row in _RAILWAY_ROW_IDX or col in _RAILWAY_COL_IDX) and row != 0 and row != _NUM_ROWS:
+                    obs[obs_row][obs_col][_idx] = 0.25
+                if [row, col] in _CAMP_POSITIONS:
+                    obs[obs_row][obs_col][_idx] = 0.5
+                if [row, col] in _FLAG_POSITIONS:
+                    obs[obs_row][obs_col][_idx] = 1
+                if [row, col] in _BLOCK_UP_POSITIONS or [row, col] in _BLOCK_DOWN_POSITIONS:
+                    obs[obs_row][obs_col][_idx] = 0
+                
 
                 # The player’s own private information.
                 # Shape: _NUM_ROWS * _NUM_COLS * _NUM_CHESS_TYPES tensor.
-                _idx = 0
+                _idx = 1
                 if chess.country == player:
                     for t in range(1, _NUM_CHESS_TYPES + 1):
                         if chess.type == t:
-                            obs[row][col][t - 1] = 1
+                            obs[obs_row][obs_col][_idx + t - 1] = 1
 
                 # The opponent’s public information.
                 # Contains all 0’s during the deployment phase.
                 # Shape: _NUM_ROWS * _NUM_COLS * _NUM_CHESS_TYPES tensor.
                 # TODO: #unrevealed(t) in paper page 36.
-                _idx = _NUM_CHESS_TYPES
+                _idx = _NUM_CHESS_TYPES + 1
 
-                def unrevealed(t):
-                    if ((state.board[state.flags_pos[player][0]][state.flags_pos[player][1]].type == ChessType.FLAG
-                         or state.board[state.flags_pos[player][0]][state.flags_pos[player][1]].type == ChessType.GENERAL)
-                            and state.board[state.flags_pos[player][0]][state.flags_pos[player][1]].revealed == True):
-                        return 0
-                    else:
-                        return _NUM_CHESS_QUANTITY_BY_TYPE[t + 1]
-
-                def sum_unrevealedk(__except=[]):
-                    __sum = 0
-                    for t in range(_NUM_CHESS_TYPES):
-                        if t not in __except:
-                            __sum += unrevealed(t)
-                    return __sum
-
-                if chess.country == 1 - player:
-                    pass_it = False
-                    if chess.type == ChessType.FLAG and chess.revealed == True:
-                        obs[row][col][i + 0] = 1
-                        pass_it = True
-                    if not pass_it:
+                if state.game_phase == GamePhase.DEPLOYING:
+                    for i in range(_NUM_CHESS_TYPES):
+                        obs[obs_row][obs_col][_idx + i] = 0
+                elif chess.revealed and chess.country == 1 - player:
+                    obs[obs_row][obs_col][_idx + 0] = 1.0
+                elif chess.country == 1 - player:
+                    a = 0
+                    for i in range(_NUM_CHESS_TYPES):
+                        a += state.obs_pub[player][row][col][i]
+                    if a != 0:
                         for i in range(_NUM_CHESS_TYPES):
-                            obs[row][col][i + _idx] = unrevealed(i) / sum_unrevealedk()
-                        for t in range(self.num_history_move):
-                            if prev_obs[row][col][t + 3 * _NUM_CHESS_TYPES] == 1:
-                                for i in range(_NUM_CHESS_TYPES):
-                                    obs[row][col][i + _idx] = unrevealed(i) / sum_unrevealedk(__except=[12, 1])
+                            obs[obs_row][obs_col][_idx + i] = state.obs_pub[player][row][col][i] / (a)
+                    else:
+                        obs[obs_row][obs_col][_idx + i] = 0
                 # ...
                 # TODO: Add the situation "if the piece at (r, c) is known to have type t".
                 #       For example 40 died and then the position of the flag
@@ -577,19 +736,22 @@ class JunQiObserver:
                 # The player’s own public information.
                 # Contains all 0’s during the deployment phase.
                 # Shape: _NUM_ROWS * _NUM_COLS * _NUM_CHESS_TYPES tensor.
-                _idx = 2 * _NUM_CHESS_TYPES
-                if chess.country == player:
-                    pass_it = False
-                    if chess.type == ChessType.FLAG and chess.revealed == True:
-                        obs[row][col][i + 0] = 1
-                        pass_it = True
-                    if not pass_it:
+                _idx = 2 * _NUM_CHESS_TYPES + 1
+
+                if state.game_phase == GamePhase.DEPLOYING:
+                    for i in range(_NUM_CHESS_TYPES):
+                        obs[obs_row][obs_col][_idx + i] = 0
+                elif chess.revealed and chess.country == player:
+                    obs[obs_row][obs_col][_idx + 0] = 1.0
+                elif chess.country == player:
+                    a = 0
+                    for i in range(_NUM_CHESS_TYPES):
+                        a += state.obs_oppo_pub[player][row][col][i]
+                    if a != 0:
                         for i in range(_NUM_CHESS_TYPES):
-                            obs[row][col][i + _idx] = unrevealed(i) / sum_unrevealedk()
-                        for t in range(self.num_history_move):
-                            if prev_obs[row][col][t + 3 * _NUM_CHESS_TYPES] == 1:
-                                for i in range(_NUM_CHESS_TYPES):
-                                    obs[row][col][i + _idx] = unrevealed(i) / sum_unrevealedk(__except=[12, 1])
+                            obs[obs_row][obs_col][_idx + i] = state.obs_oppo_pub[player][row][col][i] / (a)
+                    else:
+                        obs[obs_row][obs_col][_idx + i] = 1
                 # ...
                 # TODO: Add the situation "if the piece at (r, c) is known to have type t".
                 #       For example 40 died and then the position of the flag
@@ -597,46 +759,54 @@ class JunQiObserver:
                 # ...
                 # To be continued.
 
+
+                
                 # An encoding of the last 40(or other number) moves.
                 # Here we used a scrolling index.
                 # Shape: _NUM_ROWS * _NUM_COLS * self.num_history_move tensor.
                 # TODO: Need changes in state
-                _idx = 3 * _NUM_CHESS_TYPES
-                obs[row][col][self.mov_idx + _idx] = copy.deepcopy(state.obs_mov[player][row][col])
-                # print(obs[row][col][self.mov_idx + _idx])
+                _idx = 3 * _NUM_CHESS_TYPES + 1
+                if state.game_phase == GamePhase.SELECTING:
+                    for i in range(self.num_history_move - 1):
+                        obs[obs_row][obs_col][_idx + i] = obs[obs_row][obs_col][_idx + i + 1]
+                    obs[obs_row][obs_col][_idx + self.num_history_move - 1] = state.obs_mov[player][row][col]
+                # print(obs[obs_row][obs_col][self.mov_idx + _idx])
+                
 
                 # The ratio of the game length to the maximum length
                 # before the game is considered a draw.
                 # Shape: Scalar -> _NUM_COLS * _NUM_ROWS * 1 tensor.
-                _idx = 3 * _NUM_CHESS_TYPES + self.num_history_move
-                obs[row][col][_idx] = _GAME_INFO.max_game_length - state.game_length
+                _idx = 3 * _NUM_CHESS_TYPES + self.num_history_move + 1
+                r = state.game_length / _GAME_INFO.max_game_length
+                obs[obs_row][obs_col][_idx] = 1 - ((1 - r)**_ALPHA_EAG)
 
                 # The ratio of the number of moves since the last attack
                 # to the maximum number of moves without attack before
                 # the game is considered a draw.
                 # Shape: Scalar -> _NUM_COLS * _NUM_ROWS * 1 tensor.
-                _idx = 3 * _NUM_CHESS_TYPES + self.num_history_move + 1
-                obs[row][col][_idx] = _NUM_MAX_PEACE_STEP - state.game_length_peace
+                _idx = 3 * _NUM_CHESS_TYPES + self.num_history_move + 1 + 1
+                r = state.game_length_peace / _NUM_MAX_PEACE_STEP
+                obs[obs_row][obs_col][_idx] = 1 - ((1 - r)**_ALPHA_EAG)
 
                 # The phase of the game.
                 # Either deployment (1) or play (0).
                 # Shape: Scalar -> _NUM_COLS * _NUM_ROWS * 1 tensor.
-                _idx = 3 * _NUM_CHESS_TYPES + self.num_history_move + 2
-                obs[row][col][_idx] = 1 if state.game_phase == GamePhase.DEPLOYING else 0
+                _idx = 3 * _NUM_CHESS_TYPES + self.num_history_move + 2 + 1
+                obs[obs_row][obs_col][_idx] = 1 if state.game_phase == GamePhase.DEPLOYING else 0
                 _idx += 1
 
                 # An indication of whether the agent needs to select a
                 # piece (0) or target square (1) for an already selected piece.
                 # 0 during deployment phase.
                 # Shape: Scalar -> _NUM_COLS * _NUM_ROWS * 1 tensor.
-                _idx = 3 * _NUM_CHESS_TYPES + self.num_history_move + 3
-                obs[row][col][_idx] = 1 if state.game_phase == GamePhase.MOVING else 0
+                _idx = 3 * _NUM_CHESS_TYPES + self.num_history_move + 3 + 1
+                obs[obs_row][obs_col][_idx] = 1 if state.game_phase == GamePhase.MOVING else 0
 
                 # The piece selected in the previous step (1 for the selected
                 # piece, 0 elsewhere), if applicable, otherwise all 0’s.
                 # Shape: _NUM_COLS * _NUM_ROWS tensor -> _NUM_COLS * _NUM_ROWS * 1 tensor.
-                _idx = 3 * _NUM_CHESS_TYPES + self.num_history_move + 4
-                obs[row][col][_idx] = 1 if (state.game_phase == GamePhase.MOVING
+                _idx = 3 * _NUM_CHESS_TYPES + self.num_history_move + 4 + 1
+                obs[obs_row][obs_col][_idx] = 1 if (state.game_phase == GamePhase.MOVING
                                             and state.selected_pos[player] == [row, col]) else 0
 
         # self.string_from(state, player) # Uncomment this if you are debugging on observations
@@ -645,32 +815,49 @@ class JunQiObserver:
         """Observation of `state` from the PoV of `player`, as a string."""
         # TODO: Add string formed observation for debugging and logging.
         obs = self.dict["observation"]
-        obs_title = ["Prv.", "Pub. -i", "Pub. i", "History", "len1",
-                     "len2", "Game phase", "Select", "Prev.Selection"]
-        str_obs = [""] * 9
+        obs_title = ["Map", "Prv.", "Pub. -i", "Pub. i", "History", "LenMax",
+                     "LenAtk", "Game phase", "Select", "Prev.Selection"]
+        str_obs = [""] * 10
+        str_pub = [""] * _NUM_CHESS_TYPES
+        str_pub_oppo = [""] * _NUM_CHESS_TYPES
+        str_his = [""] * self.num_history_move
 
         for row in range(_NUM_ROWS):
             for col in range(_NUM_COLS):
-                str_obs[0] += ",".join(map(str, np.where(obs[row][col][0:_NUM_CHESS_TYPES] == 1)[0] + 1)) + ", "
-                str_obs[1] += ",".join(map(str, [obs[row][col][_NUM_CHESS_TYPES]])) + ", "
-                str_obs[2] += ",".join(map(str, [obs[row][col][2 * _NUM_CHESS_TYPES]])) + ", "
-                str_obs[3] += ",".join(map(str, [obs[row][col][3 * _NUM_CHESS_TYPES + self.mov_idx]])) + ", "
-                str_obs[4] += ",".join(map(str,
-                                           [obs[row][col][3 * _NUM_CHESS_TYPES + self.num_history_move]])) + ", "
+                str_obs[0] += ",".join(map(str, [obs[row][col][0]])) + ", "
+                str_obs[1] += ",".join(map(str, np.where(obs[row][col][1:_NUM_CHESS_TYPES + 1] == 1)[0] + 1)) + ", "
+                str_obs[2] += ",".join(map(str, [obs[row][col][_NUM_CHESS_TYPES + 1]])) + ", "
+                str_obs[3] += ",".join(map(str, [obs[row][col][2 * _NUM_CHESS_TYPES + 1]])) + ", "
+                for i in range(_NUM_CHESS_TYPES):
+                    str_pub[i] += ",".join(map(str, [obs[row][col][1 * _NUM_CHESS_TYPES + 1 + i]])) + ", "
+                    str_pub_oppo[i] += ",".join(map(str, [obs[row][col][2 * _NUM_CHESS_TYPES + 1 + i]])) + ", "
+                for i in range(self.num_history_move):
+                    str_his[i] += ",".join(map(str, [obs[row][col][3 * _NUM_CHESS_TYPES + 1 + i]])) + ", "
+                #str_obs[4] += ",".join(map(str, [obs[row][col][3 * _NUM_CHESS_TYPES + self.num_history_move -1]])) + ", "
                 str_obs[5] += ",".join(map(str,
                                            [obs[row][col][3 * _NUM_CHESS_TYPES + self.num_history_move + 1]])) + ", "
                 str_obs[6] += ",".join(map(str,
-                                           [obs[row][col][3 * _NUM_CHESS_TYPES + self.num_history_move + 2]])) + ", "
+                                           [obs[row][col][3 * _NUM_CHESS_TYPES + self.num_history_move + 1 + 1]])) + ", "
                 str_obs[7] += ",".join(map(str,
-                                           [obs[row][col][3 * _NUM_CHESS_TYPES + self.num_history_move + 3]])) + ", "
+                                           [obs[row][col][3 * _NUM_CHESS_TYPES + self.num_history_move + 2 + 1]])) + ", "
                 str_obs[8] += ",".join(map(str,
-                                           [obs[row][col][3 * _NUM_CHESS_TYPES + self.num_history_move + 4]])) + ", "
+                                           [obs[row][col][3 * _NUM_CHESS_TYPES + self.num_history_move + 3 + 1]])) + ", "
+                str_obs[9] += ",".join(map(str,
+                                           [obs[row][col][3 * _NUM_CHESS_TYPES + self.num_history_move + 4 + 1]])) + ", "
 
             for i in range(len(str_obs)):
                 str_obs[i] += "\n"
+            for i in range(_NUM_CHESS_TYPES):
+                str_pub[i]  += "\n"
+                str_pub_oppo[i]  += "\n"
+            for i in range(self.num_history_move):
+                    str_his[i] += "\n"
 
         print("Current Player: " + str(player), str(state.current_player()))
         [print(obs_title[i] + "\n" + str_obs[i]) for i in range(len(obs_title))]
+        [print("Pub" + str(i+1) + "\n" + str_pub[i]) for i in range(_NUM_CHESS_TYPES)]
+        [print("Pub oppo " + str(i+1) + "\n" + str_pub_oppo[i]) for i in range(_NUM_CHESS_TYPES)]
+        [print("History " + str(i+1) + "\n" + str_his[i]) for i in range(self.num_history_move)]
 
 
 # Helper functions for game details.
@@ -704,7 +891,7 @@ class Chess:
 
     def __str__(self):
         if self.type == ChessType.NONE:
-            return f"\033[;;m{self.name}\033[0m"
+            return f"\033[;30;44m{self.name}\033[0m"
         elif self.country == 0:
             return f"\033[;30;43m{self.name}\033[0m"
         elif self.country == 1:

@@ -26,7 +26,7 @@ import time
 import threading
 import warnings
 
-from open_spiel.python.algorithms.rnad import rnad_for_junqi as rnad
+import learner as rnad
 
 _exit = 0
 _TIME_GAP = 60
@@ -39,23 +39,6 @@ flags.DEFINE_string("game_name", "junqi1", "Name of the game")
 
 loss_values = []
 epochs = []
-
-
-def command_line_action(time_step):
-    """Gets a valid action from the user on the command line."""
-    current_player = time_step.observations["current_player"]
-    legal_actions = time_step.observations["legal_actions"][current_player]
-    action = -1
-    while action not in legal_actions:
-        print("Choose an action from {}:".format(legal_actions))
-        sys.stdout.flush()
-        action_str = input()
-        try:
-            action = int(action_str)
-        except ValueError:
-            continue
-    return action
-
 
 def eval_against_random_bots(env, trained_agents, random_agents, num_episodes):
     """Evaluates `trained_agents` against `random_agents` for `num_episodes`."""
@@ -76,56 +59,15 @@ def eval_against_random_bots(env, trained_agents, random_agents, num_episodes):
     return wins / num_episodes
 
 
-class JunQiSolver(rnad.RNaDSolver):
+class JunQiSolver(rnad.RNaDLearner):
     pass
-
-
-class HiddenPrints:
-    def __enter__(self):
-        self._original_stdout = sys.stdout
-        sys.stdout = open(os.devnull, 'w')
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        sys.stdout.close()
-        sys.stdout = self._original_stdout
-
-
-def plot():
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        plt.ion()  # Turn on interactive mode for dynamic updating
-        fig, ax = plt.subplots()
-        # matplotlib.use('TkAgg')
-        ax.set_title('Training Loss Curve')
-        ax.set_xlabel('Iteration')
-        ax.set_ylabel('Loss')
-        while not _exit:
-            plt.pause(_TIME_GAP)
-            ax.clear()
-            ax.plot(epochs, loss_values)  # , marker='o', linestyle='-')
-            ax.set_title('Training Loss Curve')
-            ax.set_xlabel('Epoch')
-            ax.set_ylabel('Loss')
-            plt.pause(0.01)
-            plt.draw()
-            plt.pause(0.01)
-
-
-def print_loss(any, i):
-    loss_values.append(any['loss'].tolist())
-    epochs.append(any['learner_steps'])
-    if i % 1 == 0:
-        print(f"[DATA] Loss: {round(any['loss'].tolist(), 4)}, "
-              f"Actor Steps: {any['actor_steps']}, "
-              f"Learner Steps: {any['learner_steps']}")
-
 
 config = rnad.RNaDConfig(
     game_name='junqi1',
-    trajectory_max=100,
+    trajectory_max=300,
     state_representation=rnad.StateRepresentation.INFO_SET,
     policy_network_layers=(256, 256),
-    batch_size=256,
+    batch_size=1,
     learning_rate=0.00005,
     adam=rnad.AdamConfig(),
     clip_gradient=10_000,
@@ -145,11 +87,11 @@ def main(unused_argv):
     rnad_solver = JunQiSolver(config)
 
 
-    with open('model.pkl', 'rb') as f:
+    with open('data/model.pkl', 'rb') as f:
         rnad_solver = pickle.load(f)
 
-    rnad_solver.pit_random()
-    #rnad_solver.pit()
+    #rnad_solver.pit_random()
+    rnad_solver.pit()
 
 
 if __name__ == "__main__":
