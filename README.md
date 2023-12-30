@@ -28,7 +28,7 @@
 ![bs20_itr5000](https://github.com/JimZhouZZY/RNaD-JunQi/assets/140597003/49ea8752-b47c-437d-8fe4-e4f7ac8f262f)
 
 ## 环境搭建
-#### **注意：仅支持 linux 环境, 开发和训练试用 ubuntu 22.04 20.04**
+#### **注意：仅支持 linux 环境, 开发和训练试用 ubuntu 22.04 和 ubuntu 20.04**
 首先安装带有军棋游戏的 Open Spiel 框架，以及jax, dm-haiku等依赖项
 ```
 pip install open-spiel-junqi==1.4.2 jax dm-haiku
