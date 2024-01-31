@@ -25,14 +25,13 @@ from jax import lax
 from jax import numpy as jnp
 from jax import tree_util as tree
 import ray
-import tensorflow as tf
 
 import numpy as np
 import optax
 
 from open_spiel.python import policy as policy_lib
 import pyspiel
-from network.cnn_128 import PyramidModule, ValueHeadModule, PolicyHeadModule
+from network.cnn_paper_32 import PyramidModule, ValueHeadModule, PolicyHeadModule
 
 # Some handy aliases.
 # Since most of these are just aliases for a "bag of tensors", the goal
@@ -1089,6 +1088,8 @@ class RNaDLearner(policy_lib.Policy):
                     a = [command_line_action(state, a) for _ in range(1)]
                 states = self._batch_of_states_apply_action(states, a)
                 env_step = self._batch_of_states_as_env_step(states)
+                if states[0]._is_terminal == True:
+                    break
             print(state.game_length)
             print(state.game_length_real)
             human_player = 1 - human_player
@@ -1113,6 +1114,7 @@ class RNaDLearner(policy_lib.Policy):
             env_step = self._batch_of_states_as_env_step(states)
             state = states[0]
             while not state.is_terminal():
+                #print(str(state)+"\n")
                 a = None
                 if state.current_player() == random_player:
                     actions = state.legal_actions()
